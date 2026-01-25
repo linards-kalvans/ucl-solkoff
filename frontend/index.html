@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UEFA Champions League - Solkoff Coefficients</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>UEFA Champions League</h1>
+            <h2>Standings with Solkoff Coefficients</h2>
+        </header>
+
+        <div class="controls">
+            <button id="refreshBtn" class="btn">Refresh Data</button>
+            <span id="lastUpdated" class="last-updated"></span>
+            <div class="sort-help">
+                <small>Click headers to sort • 3rd click removes sort • Strength = Points × Solkoff</small>
+            </div>
+        </div>
+
+        <div id="loading" class="loading">Loading standings...</div>
+        <div id="error" class="error" style="display: none;"></div>
+
+        <div class="table-container">
+            <table id="standingsTable" class="standings-table">
+                <thead>
+                    <tr>
+                        <th>Pos</th>
+                        <th>Team</th>
+                        <th>P</th>
+                        <th>W</th>
+                        <th>D</th>
+                        <th>L</th>
+                        <th>GF</th>
+                        <th>GA</th>
+                        <th>GD</th>
+                        <th>Pts</th>
+                        <th>Solkoff</th>
+                        <th>Strength</th>
+                    </tr>
+                </thead>
+                <tbody id="standingsBody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+
+</html>
