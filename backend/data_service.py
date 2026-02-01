@@ -300,41 +300,59 @@ class DataService:
                 if existing_matches < 50:
                     # Determine if this is current season (use API) or historical (use GitHub)
                     is_current_season = (season_year == current_season_start)
-                    # For historical seasons, check if GitHub has data before adding to fetch list
-                    if not is_current_season:
-                        season_str = f"{season_year}-{str(season_year + 1)[-2:]}"
-                        if not self.github_fetcher.check_season_exists(season_str):
-                            logger.debug(f"Skipping {comp_name} season {season_str} - not available in GitHub")
-                            continue
                     seasons_to_fetch.append((comp_id, comp_name, season_year, is_current_season))
         
         total_seasons = len(seasons_to_fetch)
         logger.info(f"Found {total_seasons} seasons to fetch")
         
-        for idx, (comp_id, comp_name, season_year, is_current) in enumerate(seasons_to_fetch):
-            try:
-                logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1} ({'current' if is_current else 'historical'})")
-                
-                if is_current:
-                    # Use football-data.org API for current season
-                    if idx > 0:
-                        time.sleep(delay_between_requests)
-                    self._sync_season_from_api(comp_id, comp_name, season_year)
-                else:
-                    # Use GitHub for historical seasons
-                    self._sync_season_from_github(comp_id, comp_name, season_year)
+        # Clone GitHub repository once for all historical seasons
+        github_cloned = False
+        try:
+            # Check if we need GitHub data
+            has_historical_seasons = any(not is_current for _, _, _, is_current in seasons_to_fetch)
+            
+            if has_historical_seasons:
+                logger.info("Cloning GitHub repository for historical data...")
+                self.github_fetcher.clone_repository()
+                github_cloned = True
+                logger.info("GitHub repository cloned successfully")
+        except Exception as e:
+            logger.error(f"Failed to clone GitHub repository: {e}")
+            logger.warning("Will skip historical seasons that require GitHub data")
+        
+        try:
+            for idx, (comp_id, comp_name, season_year, is_current) in enumerate(seasons_to_fetch):
+                try:
+                    logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1} ({'current' if is_current else 'historical'})")
                     
-            except Exception as e:
-                error_msg = str(e)
-                # Check if it's a rate limit error
-                if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
-                    logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
-                    time.sleep(10)
-                    continue
-                else:
-                    logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
-                    time.sleep(delay_between_requests)
-                    continue
+                    if is_current:
+                        # Use football-data.org API for current season
+                        if idx > 0:
+                            time.sleep(delay_between_requests)
+                        self._sync_season_from_api(comp_id, comp_name, season_year)
+                    else:
+                        # Use GitHub for historical seasons
+                        if not github_cloned:
+                            logger.warning(f"Skipping {comp_name} season {season_year}/{season_year+1} - GitHub repo not available")
+                            continue
+                        self._sync_season_from_github(comp_id, comp_name, season_year)
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    # Check if it's a rate limit error
+                    if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
+                        logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
+                        time.sleep(10)
+                        continue
+                    else:
+                        logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
+                        time.sleep(delay_between_requests)
+                        continue
+        finally:
+            # Always cleanup GitHub repository
+            if github_cloned:
+                logger.info("Cleaning up cloned GitHub repository...")
+                self.github_fetcher.cleanup()
         
         logger.info("Historical data sync completed")
     

@@ -1,67 +1,81 @@
 """Fetcher for historical football data from openfootball/champions-league GitHub repository."""
 import logging
-import httpx
-import time
+import tempfile
+import shutil
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+from git import Repo
 
 logger = logging.getLogger(__name__)
 
 
 class GitHubDataFetcher:
-    """Fetches raw text files from openfootball/champions-league repository."""
+    """Clones and extracts data from openfootball/champions-league repository."""
     
-    BASE_URL = "https://raw.githubusercontent.com/openfootball/champions-league/master"
-    REPO_API_URL = "https://api.github.com/repos/openfootball/champions-league/contents"
+    REPO_URL = "https://github.com/openfootball/champions-league.git"
     
     def __init__(self, cache_dir: Optional[str] = None):
         """Initialize GitHub data fetcher.
         
         Args:
-            cache_dir: Directory to cache fetched files (optional)
+            cache_dir: Directory to cache fetched files (optional, not used with clone approach)
         """
         self.cache_dir = Path(cache_dir) if cache_dir else None
-        if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.client = httpx.Client(timeout=30.0, follow_redirects=True)
-        self.last_request_time = 0
-        self.min_request_interval = 1.0  # 1 second between requests to respect rate limits
+        self.cloned_repo_path: Optional[Path] = None
+        self._temp_dir: Optional[Path] = None
     
-    def _rate_limit(self):
-        """Enforce minimum time between requests."""
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.min_request_interval:
-            time.sleep(self.min_request_interval - elapsed)
-        self.last_request_time = time.time()
-    
-    def _get_cache_path(self, season: str, competition: str) -> Optional[Path]:
-        """Get cache file path for a season and competition.
+    def clone_repository(self) -> Path:
+        """Clone the repository to a temporary location.
         
-        Args:
-            season: Season identifier (e.g., "2023-24")
-            competition: Competition type (CL, EL, UCL)
-            
         Returns:
-            Path to cache file or None if caching disabled
+            Path to the cloned repository
+            
+        Raises:
+            RuntimeError: If cloning fails
         """
-        if not self.cache_dir:
-            return None
+        if self.cloned_repo_path and self.cloned_repo_path.exists():
+            logger.debug("Repository already cloned, reusing existing clone")
+            return self.cloned_repo_path
         
-        # Map competition codes to directory names
-        comp_map = {
-            "CL": "champions-league",
-            "EL": "europa-league",
-            "UCL": "conference-league"
-        }
-        comp_dir = comp_map.get(competition, competition.lower())
-        
-        cache_file = self.cache_dir / comp_dir / f"{season}.txt"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        return cache_file
+        try:
+            # Create temporary directory
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="ucl-solkoff-github-"))
+            self.cloned_repo_path = self._temp_dir / "champions-league"
+            
+            logger.info(f"Cloning repository to {self.cloned_repo_path}")
+            
+            # Clone repository using GitPython (shallow clone for speed)
+            Repo.clone_from(
+                self.REPO_URL,
+                str(self.cloned_repo_path),
+                depth=1,  # Shallow clone for speed
+                progress=None  # Disable progress output
+            )
+            
+            logger.info("Repository cloned successfully")
+            return self.cloned_repo_path
+            
+        except ImportError:
+            raise RuntimeError("GitPython is not installed. Please install it with: pip install GitPython")
+        except Exception as e:
+            # Clean up on error
+            self.cleanup()
+            raise RuntimeError(f"Failed to clone repository: {e}")
+    
+    def cleanup(self):
+        """Remove the temporary cloned repository."""
+        if self._temp_dir and self._temp_dir.exists():
+            try:
+                logger.debug(f"Cleaning up temporary directory: {self._temp_dir}")
+                shutil.rmtree(self._temp_dir)
+                self._temp_dir = None
+                self.cloned_repo_path = None
+                logger.debug("Temporary directory removed")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temporary directory: {e}")
     
     def check_season_exists(self, season: str) -> bool:
-        """Check if a season directory exists in the repository.
+        """Check if a season directory exists in the cloned repository.
         
         Args:
             season: Season identifier (e.g., "2023-24")
@@ -69,22 +83,11 @@ class GitHubDataFetcher:
         Returns:
             True if season directory exists
         """
-        self._rate_limit()
-        
-        try:
-            # Check if season directory exists via GitHub API
-            url = f"{self.REPO_API_URL}/{season}"
-            response = self.client.get(url)
-            if response.status_code == 200:
-                return True
-            elif response.status_code == 404:
-                return False
-            else:
-                logger.debug(f"Unexpected status {response.status_code} when checking season {season}")
-                return False
-        except Exception as e:
-            logger.debug(f"Error checking season {season}: {e}")
+        if not self.cloned_repo_path:
             return False
+        
+        season_path = self.cloned_repo_path / season
+        return season_path.exists() and season_path.is_dir()
     
     def list_files_in_season(self, season: str) -> List[str]:
         """List available files in a season directory.
@@ -95,42 +98,35 @@ class GitHubDataFetcher:
         Returns:
             List of file names in the season directory
         """
-        self._rate_limit()
-        
-        try:
-            url = f"{self.REPO_API_URL}/{season}"
-            response = self.client.get(url)
-            if response.status_code != 200:
-                return []
-            
-            contents = response.json()
-            files = []
-            for item in contents:
-                if item.get("type") == "file" and item.get("name", "").endswith(".txt"):
-                    files.append(item.get("name"))
-            
-            return files
-        except Exception as e:
-            logger.debug(f"Error listing files for season {season}: {e}")
+        if not self.cloned_repo_path:
             return []
+        
+        season_path = self.cloned_repo_path / season
+        if not season_path.exists():
+            return []
+        
+        files = []
+        for file_path in season_path.iterdir():
+            if file_path.is_file() and file_path.suffix == ".txt":
+                files.append(file_path.name)
+        
+        return files
     
     def fetch_season_file(self, season: str, competition: str = "CL") -> Optional[str]:
-        """Fetch a season file from GitHub.
+        """Read a season file from the cloned repository.
         
         Args:
-            season: Season identifier (e.g., "2023-24" or "2023-24")
+            season: Season identifier (e.g., "2023-24")
             competition: Competition type (CL, EL, UCL)
             
         Returns:
             File content as string, or None if not found
         """
-        # Check cache first
-        cache_path = self._get_cache_path(season, competition)
-        if cache_path and cache_path.exists():
-            logger.debug(f"Loading {season} {competition} from cache")
-            return cache_path.read_text(encoding='utf-8')
+        if not self.cloned_repo_path:
+            logger.warning("Repository not cloned. Call clone_repository() first.")
+            return None
         
-        # First, check if season directory exists
+        # Check if season directory exists
         if not self.check_season_exists(season):
             logger.debug(f"Season {season} does not exist in repository")
             return None
@@ -162,94 +158,65 @@ class GitHubDataFetcher:
             "conference-league.txt"  # Fallback for UCL
         ])
         
+        season_path = self.cloned_repo_path / season
+        
         # Try files that actually exist in the directory
         for file_name in file_names_to_try:
             if file_name in available_files:
-                url = f"{self.BASE_URL}/{season}/{file_name}"
-                self._rate_limit()
-                
+                file_path = season_path / file_name
                 try:
-                    response = self.client.get(url)
-                    if response.status_code == 200:
-                        content = response.text
-                        
-                        # Cache the content
-                        if cache_path:
-                            cache_path.write_text(content, encoding='utf-8')
-                        
-                        logger.info(f"Fetched {season} {competition} from GitHub ({file_name})")
-                        return content
+                    content = file_path.read_text(encoding='utf-8')
+                    logger.info(f"Read {season} {competition} from cloned repo ({file_name})")
+                    return content
                 except Exception as e:
-                    logger.debug(f"Error fetching {url}: {e}")
+                    logger.debug(f"Error reading {file_path}: {e}")
                     continue
         
         # If no specific file found, try any .txt file in the directory
         # (some seasons might have a single file with all competitions)
         for file_name in available_files:
             if file_name.endswith('.txt') and file_name not in file_names_to_try:
-                url = f"{self.BASE_URL}/{season}/{file_name}"
-                self._rate_limit()
-                
+                file_path = season_path / file_name
                 try:
-                    response = self.client.get(url)
-                    if response.status_code == 200:
-                        content = response.text
-                        # Check if content contains our competition
-                        content_lower = content.lower()
-                        comp_keywords = {
-                            "CL": ["champions league", "uefa champions"],
-                            "EL": ["europa league", "uefa europa"],
-                            "UCL": ["conference league", "uefa conference", "europa conference"]
-                        }
-                        keywords = comp_keywords.get(competition, [])
-                        if any(keyword in content_lower for keyword in keywords):
-                            # Cache the content
-                            if cache_path:
-                                cache_path.write_text(content, encoding='utf-8')
-                            
-                            logger.info(f"Fetched {season} {competition} from GitHub ({file_name})")
-                            return content
+                    content = file_path.read_text(encoding='utf-8')
+                    # Check if content contains our competition
+                    content_lower = content.lower()
+                    comp_keywords = {
+                        "CL": ["champions league", "uefa champions"],
+                        "EL": ["europa league", "uefa europa"],
+                        "UCL": ["conference league", "uefa conference", "europa conference"]
+                    }
+                    keywords = comp_keywords.get(competition, [])
+                    if any(keyword in content_lower for keyword in keywords):
+                        logger.info(f"Read {season} {competition} from cloned repo ({file_name})")
+                        return content
                 except Exception as e:
-                    logger.debug(f"Error fetching {url}: {e}")
+                    logger.debug(f"Error reading {file_path}: {e}")
                     continue
         
         logger.warning(f"Could not find file for season {season}, competition {competition}")
         return None
     
-    def list_available_seasons(self, competition: str = "CL") -> list[str]:
-        """List available seasons in the repository.
+    def list_available_seasons(self) -> List[str]:
+        """List available seasons in the cloned repository.
         
-        Args:
-            competition: Competition type (CL, EL, UCL)
-            
         Returns:
             List of season identifiers
         """
-        self._rate_limit()
-        
-        try:
-            response = self.client.get(self.REPO_API_URL)
-            if response.status_code != 200:
-                logger.warning(f"Could not list repository contents: {response.status_code}")
-                return []
-            
-            contents = response.json()
-            seasons = []
-            
-            for item in contents:
-                if item.get("type") == "dir" and item.get("name", "").startswith("20"):
-                    # Check if it's a season directory (format: YYYY-YY)
-                    name = item.get("name", "")
-                    if len(name) == 7 and name[4] == "-":
-                        seasons.append(name)
-            
-            seasons.sort(reverse=True)  # Most recent first
-            logger.info(f"Found {len(seasons)} seasons for {competition}")
-            return seasons
-            
-        except Exception as e:
-            logger.error(f"Error listing seasons: {e}")
+        if not self.cloned_repo_path:
             return []
+        
+        seasons = []
+        for item in self.cloned_repo_path.iterdir():
+            if item.is_dir() and item.name.startswith("20"):
+                # Check if it's a season directory (format: YYYY-YY)
+                name = item.name
+                if len(name) == 7 and name[4] == "-":
+                    seasons.append(name)
+        
+        seasons.sort(reverse=True)  # Most recent first
+        logger.info(f"Found {len(seasons)} seasons in repository")
+        return seasons
     
     def fetch_all_competitions_for_season(self, season: str) -> Dict[str, Optional[str]]:
         """Fetch all competition files for a season.
@@ -272,16 +239,11 @@ class GitHubDataFetcher:
         
         return results
     
-    def close(self):
-        """Close HTTP client."""
-        if self.client:
-            self.client.close()
-    
     def __enter__(self):
         """Context manager entry."""
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.close()
+        """Context manager exit - cleanup temporary directory."""
+        self.cleanup()
 
