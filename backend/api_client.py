@@ -228,4 +228,19 @@ class APIClient:
         if round_filter:
             endpoint += f"?round={round_filter}"
         return self._make_request(endpoint)
+    
+    def get_competition_matches_by_season(self, competition_id: str = "CL", season: Optional[int] = None) -> Dict[str, Any]:
+        """Get matches for a competition from a specific season.
+        
+        Args:
+            competition_id: Competition ID (default: "CL" for Champions League)
+            season: Season year (e.g., 2023 for 2023/2024 season). If None, returns current season.
+            
+        Returns:
+            Matches data
+        """
+        endpoint = f"competitions/{competition_id}/matches"
+        if season:
+            endpoint += f"?season={season}"
+        return self._make_request(endpoint)
 

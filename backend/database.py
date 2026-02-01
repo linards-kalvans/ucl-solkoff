@@ -55,6 +55,7 @@ class Database:
                 stage TEXT,
                 round TEXT,
                 group_name TEXT,
+                competition_id TEXT,
                 FOREIGN KEY (home_team_id) REFERENCES teams(id),
                 FOREIGN KEY (away_team_id) REFERENCES teams(id)
             )
@@ -158,6 +159,17 @@ class Database:
                     logger.info("Added 'group_name' column to matches table")
                 except Exception as e:
                     logger.debug(f"Could not add 'group_name' column: {e}")
+            
+            # Add competition_id column if missing
+            if 'competition_id' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE matches ADD COLUMN competition_id TEXT")
+                    logger.info("Added 'competition_id' column to matches table")
+                    # Set default value for existing rows to 'CL' (Champions League)
+                    self.conn.execute("UPDATE matches SET competition_id = 'CL' WHERE competition_id IS NULL")
+                    self.conn.commit()
+                except Exception as e:
+                    logger.debug(f"Could not add 'competition_id' column: {e}")
                     
         except Exception as e:
             # Table might not exist yet, which is fine (will be created by CREATE TABLE IF NOT EXISTS)

@@ -137,16 +137,17 @@ class DataService:
                 self.db.execute("""
                     INSERT INTO matches (
                         id, home_team_id, away_team_id, home_score, away_score,
-                        matchday, date, status, stage, round, group_name
+                        matchday, date, status, stage, round, group_name, competition_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                         home_score = excluded.home_score,
                         away_score = excluded.away_score,
                         status = excluded.status,
                         stage = excluded.stage,
                         round = excluded.round,
-                        group_name = excluded.group_name
+                        group_name = excluded.group_name,
+                        competition_id = excluded.competition_id
                 """, (
                     match_id,
                     home_team_id,
@@ -158,7 +159,8 @@ class DataService:
                     match.get("status"),
                     stage,
                     round_name,
-                    group_name
+                    group_name,
+                    competition_id
                 ))
                 matches_inserted += 1
             except Exception as e:
@@ -234,6 +236,154 @@ class DataService:
         
         self.db.commit()
         logger.info(f"Synced {standings_inserted} standings, skipped {standings_skipped} invalid entries")
+    
+    def sync_historical_matches(self, years_back: int = 10):
+        """Sync historical matches from European competitions for the past N years.
+        
+        Fetches matches from:
+        - Champions League (CL)
+        - Europa League (EL)
+        - Conference League (EC)
+        
+        Args:
+            years_back: Number of years to look back (default: 10)
+        """
+        from datetime import datetime
+        
+        current_year = datetime.now().year
+        current_season_start = current_year if datetime.now().month >= 8 else current_year - 1
+        
+        # European competition IDs
+        competitions = {
+            "CL": "Champions League",
+            "EL": "Europa League",
+            "EC": "Conference League"
+        }
+        
+        logger.info(f"Starting historical data sync for {years_back} years")
+        
+        for comp_id, comp_name in competitions.items():
+            logger.info(f"Syncing historical matches for {comp_name} ({comp_id})")
+            
+            # Fetch matches for each season going back
+            for year_offset in range(years_back + 1):
+                season_year = current_season_start - year_offset
+                
+                try:
+                    logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1}")
+                    matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
+                    
+                    if "matches" not in matches_data:
+                        logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
+                        continue
+                    
+                    matches_inserted = 0
+                    matches_skipped = 0
+                    
+                    for match in matches_data["matches"]:
+                        match_id = match.get("id")
+                        home_team = match.get("homeTeam", {})
+                        away_team = match.get("awayTeam", {})
+                        
+                        home_team_id = home_team.get("id")
+                        away_team_id = away_team.get("id")
+                        
+                        if not match_id or not home_team_id or not away_team_id:
+                            matches_skipped += 1
+                            continue
+                        
+                        # Store teams
+                        try:
+                            self.db.execute("""
+                                INSERT INTO teams (id, name, code, crest)
+                                VALUES (?, ?, ?, ?)
+                                ON CONFLICT (id) DO UPDATE SET
+                                    name = excluded.name,
+                                    code = excluded.code,
+                                    crest = excluded.crest
+                            """, (
+                                home_team_id,
+                                home_team.get("name"),
+                                home_team.get("shortName"),
+                                home_team.get("crest")
+                            ))
+                            self.db.execute("""
+                                INSERT INTO teams (id, name, code, crest)
+                                VALUES (?, ?, ?, ?)
+                                ON CONFLICT (id) DO UPDATE SET
+                                    name = excluded.name,
+                                    code = excluded.code,
+                                    crest = excluded.crest
+                            """, (
+                                away_team_id,
+                                away_team.get("name"),
+                                away_team.get("shortName"),
+                                away_team.get("crest")
+                            ))
+                        except Exception as e:
+                            logger.debug(f"Error storing teams for match {match_id}: {e}")
+                        
+                        # Extract match details
+                        full_time = match.get("score", {}).get("fullTime", {})
+                        stage = match.get("stage")
+                        round_info = match.get("round")
+                        if isinstance(round_info, dict):
+                            round_name = round_info.get("name") or round_info.get("round")
+                        else:
+                            round_name = round_info
+                        
+                        group_info = match.get("group")
+                        if isinstance(group_info, dict):
+                            group_name = group_info.get("name") or group_info.get("group")
+                        else:
+                            group_name = group_info
+                        
+                        try:
+                            self.db.execute("""
+                                INSERT INTO matches (
+                                    id, home_team_id, away_team_id, home_score, away_score,
+                                    matchday, date, status, stage, round, group_name, competition_id
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT (id) DO UPDATE SET
+                                    home_score = excluded.home_score,
+                                    away_score = excluded.away_score,
+                                    status = excluded.status,
+                                    stage = excluded.stage,
+                                    round = excluded.round,
+                                    group_name = excluded.group_name,
+                                    competition_id = excluded.competition_id
+                            """, (
+                                match_id,
+                                home_team_id,
+                                away_team_id,
+                                full_time.get("home"),
+                                full_time.get("away"),
+                                match.get("matchday"),
+                                match.get("utcDate"),
+                                match.get("status"),
+                                stage,
+                                round_name,
+                                group_name,
+                                comp_id
+                            ))
+                            matches_inserted += 1
+                        except Exception as e:
+                            logger.debug(f"Skipping match {match_id}: {e}")
+                            matches_skipped += 1
+                    
+                    self.db.commit()
+                    logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} (skipped {matches_skipped})")
+                    
+                    # Add a small delay to avoid rate limiting
+                    import time
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
+                    continue
+        
+        logger.info("Historical data sync completed")
     
     def sync_all(self, competition_id: str = "CL"):
         """Sync all data (teams, matches, standings).

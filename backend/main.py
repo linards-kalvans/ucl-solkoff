@@ -94,7 +94,12 @@ if os.path.exists(frontend_path):
         """Serve the frontend index page."""
         index_path = os.path.join(frontend_path, "index.html")
         if os.path.exists(index_path):
-            return FileResponse(index_path)
+            response = FileResponse(index_path)
+            # Add no-cache headers to force browser reload
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            return response
         return {"message": "UCL Solkoff API", "version": "1.0.0"}
     
     # Serve other frontend files (CSS, JS, etc.)
@@ -107,13 +112,23 @@ if os.path.exists(frontend_path):
         
         file_path = os.path.join(frontend_path, filename)
         if os.path.exists(file_path) and os.path.isfile(file_path):
-            return FileResponse(file_path)
+            response = FileResponse(file_path)
+            # Add no-cache headers for CSS, JS, and HTML files to force browser reload
+            if filename.endswith(('.css', '.js', '.html')):
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
         
         # For SPA routing, serve index.html for non-API routes
         if not filename.startswith("api/"):
             index_path = os.path.join(frontend_path, "index.html")
             if os.path.exists(index_path):
-                return FileResponse(index_path)
+                response = FileResponse(index_path)
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+                return response
         
         raise HTTPException(status_code=404, detail="Not found")
 else:
@@ -207,11 +222,45 @@ async def refresh_data():
         raise HTTPException(status_code=503, detail="Scheduler not initialized")
     
     try:
+        # Trigger regular update
         scheduler.trigger_update()
         return {"message": "Data refresh triggered successfully"}
     except Exception as e:
         logger.error(f"Error refreshing data: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error refreshing data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error refreshing data")
+
+
+@app.post("/api/refresh-historical")
+async def refresh_historical_data(years_back: int = 10):
+    """Manually trigger historical data sync from European competitions.
+    
+    Args:
+        years_back: Number of years to look back (default: 10)
+    
+    Returns:
+        Success message
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        from backend.api_client import APIClient
+        from backend.api_cache import APICache
+        from backend.data_service import DataService
+        
+        # Initialize API client with cache
+        cache_ttl = int(os.getenv("API_CACHE_TTL", "3600"))
+        api_cache = APICache(db, default_ttl_seconds=cache_ttl)
+        api_client = APIClient(cache=api_cache, use_cache=True)
+        data_service = DataService(db, api_client)
+        
+        logger.info(f"Starting historical data sync for {years_back} years")
+        data_service.sync_historical_matches(years_back=years_back)
+        
+        return {"message": f"Historical data sync completed for {years_back} years"}
+    except Exception as e:
+        logger.error(f"Error syncing historical data: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error syncing historical data: {str(e)}")
 
 
 @app.post("/api/cache/clear")

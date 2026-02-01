@@ -240,8 +240,8 @@ class PlayoffAnalyzer:
         
         pairs.sort(key=lambda x: (
             stage_priority.get(x["stage"], 99),
-            x["matchday"],
-            x.get("date", "")
+            x.get("matchday") if x.get("matchday") is not None else 0,
+            x.get("date") if x.get("date") is not None else ""
         ))
         
         return pairs
@@ -388,8 +388,16 @@ class PlayoffAnalyzer:
         
         # Build query conditions
         conditions = ["m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')"]
-        # Don't exclude LEAGUE_STAGE here - we want to see what stages we actually have
-        # conditions.append("m.stage != 'LEAGUE_STAGE'")
+        # Only get current season matches (competition_id = 'CL' for current season)
+        # Filter by date to get only current season (August of current year onwards, or previous August if we're before August)
+        from datetime import datetime
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        # Season starts in August, so if we're before August, the season started in previous year
+        season_start_year = current_year if current_month >= 8 else current_year - 1
+        season_start_date = f"{season_start_year}-08-01"
+        conditions.append(f"m.competition_id = '{competition_id}'")
+        conditions.append(f"m.date >= '{season_start_date}'")
         
         round_conditions = []
         if filters['round_patterns']:
@@ -539,8 +547,11 @@ class PlayoffAnalyzer:
                     "method": "error"
                 }
         
-        # Sort by matchday and date
-        pairs.sort(key=lambda x: (x.get("matchday", 0), x.get("date", "")))
+        # Sort by matchday and date (handle None values)
+        pairs.sort(key=lambda x: (
+            x.get("matchday") if x.get("matchday") is not None else 0,
+            x.get("date") if x.get("date") is not None else ""
+        ))
         
         return pairs
     
@@ -660,7 +671,7 @@ class PlayoffAnalyzer:
         """Calculate a league table based on results against common opponents.
         
         Includes all teams (team1, team2, and all common opponents) and their
-        matches against each other.
+        matches against each other from the last 10 years of European competitions.
         
         Args:
             team1_id: First team ID
@@ -678,21 +689,15 @@ class PlayoffAnalyzer:
                 "fullLeagueTable": []
             }
         
-        # Get all matches against common opponents for both teams
-        # Use parameterized query to avoid SQL injection
-        if not common_opponents:
-            return {
-                "team1": self._get_team_stats(team1_id, []),
-                "team2": self._get_team_stats(team2_id, []),
-                "commonOpponents": []
-            }
+        # Calculate cutoff date for historical matches (last 10 years)
+        cutoff_date = (datetime.now() - timedelta(days=self.historical_years * 365)).strftime("%Y-%m-%d")
         
         # Build parameter lists properly - convert set to list for consistent ordering
         common_opponents_list = list(common_opponents)
         placeholders = ','.join(['?' for _ in common_opponents_list])
         
-        # Team 1 query parameters: 6 team1_id params + common opponents
-        team1_params = [team1_id] * 6 + common_opponents_list
+        # Team 1 query parameters: 6 team1_id params + common opponents + cutoff_date
+        team1_params = [team1_id] * 6 + common_opponents_list + [cutoff_date]
         
         team1_matches = self.db.fetchall(f"""
             SELECT 
@@ -718,11 +723,12 @@ class PlayoffAnalyzer:
                 END IN ({placeholders})
             )
             AND m.status = 'FINISHED'
+            AND m.date >= ?
             ORDER BY m.date DESC
         """, tuple(team1_params))
         
-        # Team 2 query parameters: 6 team2_id params + common opponents
-        team2_params = [team2_id] * 6 + common_opponents_list
+        # Team 2 query parameters: 6 team2_id params + common opponents + cutoff_date
+        team2_params = [team2_id] * 6 + common_opponents_list + [cutoff_date]
         
         team2_matches = self.db.fetchall(f"""
             SELECT 
@@ -748,6 +754,7 @@ class PlayoffAnalyzer:
                 END IN ({placeholders})
             )
             AND m.status = 'FINISHED'
+            AND m.date >= ?
             ORDER BY m.date DESC
         """, tuple(team2_params))
         
@@ -767,7 +774,7 @@ class PlayoffAnalyzer:
         all_team_ids_list = list(all_team_ids)
         all_placeholders = ','.join(['?' for _ in all_team_ids_list])
         
-        # Get all matches where both teams are in our group
+        # Get all matches where both teams are in our group (last 10 years)
         all_matches = self.db.fetchall(f"""
             SELECT 
                 m.home_team_id,
@@ -779,8 +786,9 @@ class PlayoffAnalyzer:
             WHERE m.home_team_id IN ({all_placeholders})
             AND m.away_team_id IN ({all_placeholders})
             AND m.status = 'FINISHED'
+            AND m.date >= ?
             ORDER BY m.date DESC
-        """, tuple(all_team_ids_list) + tuple(all_team_ids_list))
+        """, tuple(all_team_ids_list) + tuple(all_team_ids_list) + (cutoff_date,))
         
         # Calculate statistics for all teams
         all_teams_stats = {}
