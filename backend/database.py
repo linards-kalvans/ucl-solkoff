@@ -127,6 +127,16 @@ class Database:
             # Table might not exist yet, which is fine
             logger.debug(f"Could not migrate solkoff_coefficients schema (this is OK if table doesn't exist): {e}")
         
+        # API cache table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key TEXT PRIMARY KEY,
+                response_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        """)
+        
         self.conn.commit()
     
     def _migrate_matches_table(self):
@@ -227,4 +237,3 @@ class Database:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
-

@@ -36,10 +36,12 @@ class DataService:
                 if "table" in group:
                     for entry in group["table"]:
                         team = entry.get("team", {})
+                        # Prefer tla (3-letter code), fallback to shortName, then None
+                        code = team.get("tla") or team.get("shortName")
                         teams.add((
                             team.get("id"),
                             team.get("name"),
-                            team.get("tla"),  # Three letter abbreviation
+                            code,
                             team.get("crest")
                         ))
         
@@ -50,16 +52,20 @@ class DataService:
                 home_team = match.get("homeTeam", {})
                 away_team = match.get("awayTeam", {})
                 
+                # Prefer tla, fallback to shortName
+                home_code = home_team.get("tla") or home_team.get("shortName")
+                away_code = away_team.get("tla") or away_team.get("shortName")
+                
                 teams.add((
                     home_team.get("id"),
                     home_team.get("name"),
-                    home_team.get("shortName"),
+                    home_code,
                     home_team.get("crest")
                 ))
                 teams.add((
                     away_team.get("id"),
                     away_team.get("name"),
-                    away_team.get("shortName"),
+                    away_code,
                     away_team.get("crest")
                 ))
         
@@ -205,17 +211,17 @@ class DataService:
                             goals_for, goals_against, goal_difference, points, last_updated
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT (team_id) DO UPDATE SET
-                            position = excluded.position,
-                            played = excluded.played,
-                            won = excluded.won,
-                            drawn = excluded.drawn,
-                            lost = excluded.lost,
-                            goals_for = excluded.goals_for,
-                            goals_against = excluded.goals_against,
-                            goal_difference = excluded.goal_difference,
-                            points = excluded.points,
-                            last_updated = excluded.last_updated
+                            ON CONFLICT (team_id) DO UPDATE SET
+                                position = excluded.position,
+                                played = excluded.played,
+                                won = excluded.won,
+                                drawn = excluded.drawn,
+                                lost = excluded.lost,
+                                goals_for = excluded.goals_for,
+                                goals_against = excluded.goals_against,
+                                goal_difference = excluded.goal_difference,
+                                points = excluded.points,
+                                last_updated = excluded.last_updated
                     """, (
                         team_id,
                         entry.get("position"),
@@ -243,7 +249,7 @@ class DataService:
         Fetches matches from:
         - Champions League (CL)
         - Europa League (EL)
-        - Conference League (EC)
+        - Conference League (UCL)
         
         Args:
             years_back: Number of years to look back (default: 10)
@@ -256,42 +262,60 @@ class DataService:
         current_season_start = current_year if datetime.now().month >= 8 else current_year - 1
         
         # European competition IDs
+        # Note: Conference League code is "UCL" in football-data.org API (not "EC")
         competitions = {
             "CL": "Champions League",
             "EL": "Europa League",
-            "EC": "Conference League"
+            "UCL": "Conference League"
         }
         
         logger.info(f"Starting historical data sync for {years_back} years (delay: {delay_between_requests}s between requests)")
         
-        total_requests = (years_back + 1) * len(competitions)
-        estimated_time = total_requests * delay_between_requests / 60
-        logger.info(f"Estimated time: ~{estimated_time:.1f} minutes for {total_requests} API requests")
-        
+        # Count how many seasons we actually need to fetch
+        seasons_to_fetch = []
         for comp_id, comp_name in competitions.items():
-            logger.info(f"Syncing historical matches for {comp_name} ({comp_id})")
-            
-            # Fetch matches for each season going back
             for year_offset in range(years_back + 1):
                 season_year = current_season_start - year_offset
+                season_start = f"{season_year}-08-01"
+                season_end = f"{season_year + 1}-07-31"
                 
-                try:
-                    logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1}")
-                    
-                    # Add delay before making the request (except for the first one)
-                    if year_offset > 0 or comp_id != "CL":
-                        time.sleep(delay_between_requests)
-                    
-                    matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
-                    
-                    if "matches" not in matches_data:
-                        logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
-                        continue
-                    
-                    matches_inserted = 0
-                    matches_skipped = 0
-                    
-                    for match in matches_data["matches"]:
+                existing_count = self.db.fetchone("""
+                    SELECT COUNT(*) 
+                    FROM matches 
+                    WHERE competition_id = ?
+                    AND date >= ?
+                    AND date <= ?
+                """, (comp_id, season_start, season_end))
+                
+                existing_matches = existing_count[0] if existing_count else 0
+                
+                # Consider a season complete if we have at least 50 matches (reasonable threshold)
+                # This accounts for partial data or incomplete seasons
+                if existing_matches < 50:
+                    seasons_to_fetch.append((comp_id, comp_name, season_year))
+        
+        total_requests = len(seasons_to_fetch)
+        estimated_time = total_requests * delay_between_requests / 60
+        logger.info(f"Found {total_requests} seasons to fetch (estimated time: ~{estimated_time:.1f} minutes)")
+        
+        for idx, (comp_id, comp_name, season_year) in enumerate(seasons_to_fetch):
+            try:
+                logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1}")
+                
+                # Add delay before making the request (except for the first one)
+                if idx > 0:
+                    time.sleep(delay_between_requests)
+                
+                matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
+                
+                if "matches" not in matches_data:
+                    logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
+                    continue
+                
+                matches_inserted = 0
+                matches_skipped = 0
+                
+                for match in matches_data["matches"]:
                         match_id = match.get("id")
                         home_team = match.get("homeTeam", {})
                         away_team = match.get("awayTeam", {})
@@ -305,30 +329,34 @@ class DataService:
                         
                         # Store teams
                         try:
+                            # Prefer tla (3-letter code), fallback to shortName
+                            home_code = home_team.get("tla") or home_team.get("shortName")
+                            away_code = away_team.get("tla") or away_team.get("shortName")
+                            
                             self.db.execute("""
                                 INSERT INTO teams (id, name, code, crest)
                                 VALUES (?, ?, ?, ?)
                                 ON CONFLICT (id) DO UPDATE SET
-                                    name = excluded.name,
-                                    code = excluded.code,
-                                    crest = excluded.crest
+                                    name = EXCLUDED.name,
+                                    code = EXCLUDED.code,
+                                    crest = EXCLUDED.crest
                             """, (
                                 home_team_id,
                                 home_team.get("name"),
-                                home_team.get("shortName"),
+                                home_code,
                                 home_team.get("crest")
                             ))
                             self.db.execute("""
                                 INSERT INTO teams (id, name, code, crest)
                                 VALUES (?, ?, ?, ?)
                                 ON CONFLICT (id) DO UPDATE SET
-                                    name = excluded.name,
-                                    code = excluded.code,
-                                    crest = excluded.crest
+                                    name = EXCLUDED.name,
+                                    code = EXCLUDED.code,
+                                    crest = EXCLUDED.crest
                             """, (
                                 away_team_id,
                                 away_team.get("name"),
-                                away_team.get("shortName"),
+                                away_code,
                                 away_team.get("crest")
                             ))
                         except Exception as e:
@@ -382,28 +410,30 @@ class DataService:
                         except Exception as e:
                             logger.debug(f"Skipping match {match_id}: {e}")
                             matches_skipped += 1
-                    
-                    self.db.commit()
-                    logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} (skipped {matches_skipped})")
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    # Check if it's a rate limit error
-                    if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
-                        logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
-                        time.sleep(10)  # Wait longer on rate limit
-                        # Try to continue with next season instead of skipping
-                        continue
-                    else:
-                        logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
-                        # For non-rate-limit errors, add normal delay and continue
-                        time.sleep(delay_between_requests)
-                        continue
+                
+                self.db.commit()
+                logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} (skipped {matches_skipped})")
+                
+            except Exception as e:
+                error_msg = str(e)
+                # Check if it's a rate limit error
+                if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
+                    logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
+                    time.sleep(10)  # Wait longer on rate limit
+                    # Try to continue with next season instead of skipping
+                    continue
+                else:
+                    logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
+                    # For non-rate-limit errors, add normal delay and continue
+                    time.sleep(delay_between_requests)
+                    continue
             
-            # Add extra delay between competitions to avoid rate limiting
-            if comp_id != "EC":  # Don't delay after the last competition
-                logger.info(f"Completed {comp_name}. Waiting {delay_between_requests * 2}s before next competition...")
-                time.sleep(delay_between_requests * 2)
+            # Add extra delay between different competitions to avoid rate limiting
+            if idx < len(seasons_to_fetch) - 1:
+                next_comp_id, _, _ = seasons_to_fetch[idx + 1]
+                if next_comp_id != comp_id:
+                    logger.info(f"Completed {comp_name}. Waiting {delay_between_requests * 2}s before next competition...")
+                    time.sleep(delay_between_requests * 2)
         
         logger.info("Historical data sync completed")
     
