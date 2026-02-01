@@ -635,6 +635,147 @@
 }
 
 /* Matches section */
+.direct-matches-section {
+    margin-top: 30px;
+    margin-bottom: 30px;
+    padding: 20px;
+    background: #fff;
+    border: 2px solid #667eea;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(102, 126, 234, 0.1);
+}
+
+.direct-matches-section h3 {
+    margin: 0 0 20px 0;
+    color: #667eea;
+    font-size: 1.3em;
+    font-weight: 600;
+    text-align: center;
+}
+
+.direct-matches-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.direct-match-item {
+    display: flex;
+    flex-direction: column;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #6c757d;
+    transition: all 0.2s ease;
+}
+
+.direct-match-item:hover {
+    background: #e9ecef;
+    transform: translateX(2px);
+}
+
+.direct-match-item.match-win {
+    border-left-color: #28a745;
+    background: #f0f9f4;
+}
+
+.direct-match-item.match-draw {
+    border-left-color: #ffc107;
+    background: #fffbf0;
+}
+
+.direct-match-item.match-loss {
+    border-left-color: #dc3545;
+    background: #fef0f0;
+}
+
+.direct-match-teams {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 10px;
+}
+
+.direct-match-team {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+}
+
+.direct-match-team:first-child {
+    justify-content: flex-end;
+}
+
+.direct-match-team:last-child {
+    justify-content: flex-start;
+}
+
+.direct-match-logo {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+}
+
+.direct-match-team-name {
+    font-weight: 600;
+    font-size: 0.95em;
+}
+
+.direct-match-score {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 1.2em;
+    font-weight: 700;
+    color: #333;
+    min-width: 80px;
+    justify-content: center;
+}
+
+.direct-match-score .score {
+    font-size: 1.3em;
+}
+
+.match-outcome-icon {
+    font-size: 1.1em;
+    font-weight: bold;
+}
+
+.direct-match-item.match-win .match-outcome-icon {
+    color: #28a745;
+}
+
+.direct-match-item.match-draw .match-outcome-icon {
+    color: #ffc107;
+}
+
+.direct-match-item.match-loss .match-outcome-icon {
+    color: #dc3545;
+}
+
+.direct-match-meta {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    font-size: 0.85em;
+    color: #6c757d;
+    padding-top: 8px;
+    border-top: 1px solid #e9ecef;
+}
+
+.match-venue {
+    font-weight: 500;
+}
+
+.no-direct-matches {
+    text-align: center;
+    color: #6c757d;
+    font-style: italic;
+    padding: 20px;
+}
+
 .matches-section {
     margin-top: 30px;
     padding: 20px;

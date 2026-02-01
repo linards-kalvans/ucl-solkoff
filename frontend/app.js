@@ -919,6 +919,34 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
     const team1WinPercent = (normalizedTeam1 * 100).toFixed(1);
     const team2WinPercent = (normalizedTeam2 * 100).toFixed(1);
     
+    // Extract direct matches between team1 and team2
+    const team1Data = fullLeagueTable.find(t => t.teamId === team1.id);
+    const team2Data = fullLeagueTable.find(t => t.teamId === team2.id);
+    
+    const directMatches = [];
+    if (team1Data && team1Data.matches) {
+        // Find matches where team1 played against team2
+        const team1VsTeam2 = team1Data.matches.filter(m => 
+            m.opponentId === team2.id || String(m.opponentId) === String(team2.id)
+        );
+        directMatches.push(...team1VsTeam2.map(m => ({
+            ...m,
+            teamName: team1.name,
+            teamCrest: team1.crest,
+            opponentName: team2.name,
+            opponentCrest: team2.crest,
+            isHome: m.isHome
+        })));
+    }
+    
+    // Sort direct matches by date (most recent first)
+    directMatches.sort((a, b) => {
+        if (!a.date && !b.date) return 0;
+        if (!a.date) return 1;
+        if (!b.date) return -1;
+        return new Date(b.date) - new Date(a.date);
+    });
+    
     // Navigation buttons
     const hasPrevious = currentPairIndex > 0;
     const hasNext = currentPairIndex >= 0 && currentPairIndex < currentPairsList.length - 1;
@@ -937,6 +965,55 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         </div>
     ` : '';
     
+    // Build direct matches HTML
+    const directMatchesHtml = directMatches.length > 0 ? `
+        <div class="direct-matches-section">
+            <h3>Direct Matches: ${team1.name} vs ${team2.name}</h3>
+            <div class="direct-matches-list">
+                ${directMatches.map(match => {
+                    const outcomeClass = match.outcome === 'win' ? 'match-win' : 
+                                        match.outcome === 'loss' ? 'match-loss' : 'match-draw';
+                    const outcomeIcon = match.outcome === 'win' ? '✓' : 
+                                       match.outcome === 'loss' ? '✗' : '=';
+                    const homeTeam = match.isHome ? match.teamName : match.opponentName;
+                    const awayTeam = match.isHome ? match.opponentName : match.teamName;
+                    const homeScore = match.isHome ? match.teamScore : match.opponentScore;
+                    const awayScore = match.isHome ? match.opponentScore : match.teamScore;
+                    const homeCrest = match.isHome ? match.teamCrest : match.opponentCrest;
+                    const awayCrest = match.isHome ? match.opponentCrest : match.teamCrest;
+                    
+                    return `
+                        <div class="direct-match-item ${outcomeClass}">
+                            <div class="direct-match-teams">
+                                <div class="direct-match-team">
+                                    ${homeCrest ? `<img src="${homeCrest}" alt="${homeTeam}" class="direct-match-logo" onerror="this.style.display='none'">` : ''}
+                                    <span class="direct-match-team-name">${homeTeam}</span>
+                                </div>
+                                <div class="direct-match-score">
+                                    <span class="score">${homeScore}-${awayScore}</span>
+                                    <span class="match-outcome-icon">${outcomeIcon}</span>
+                                </div>
+                                <div class="direct-match-team">
+                                    ${awayCrest ? `<img src="${awayCrest}" alt="${awayTeam}" class="direct-match-logo" onerror="this.style.display='none'">` : ''}
+                                    <span class="direct-match-team-name">${awayTeam}</span>
+                                </div>
+                            </div>
+                            <div class="direct-match-meta">
+                                <span class="match-date">${match.date ? new Date(match.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : ''}</span>
+                                ${match.isHome ? '<span class="match-venue">Home</span>' : '<span class="match-venue">Away</span>'}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+    ` : `
+        <div class="direct-matches-section">
+            <h3>Direct Matches: ${team1.name} vs ${team2.name}</h3>
+            <p class="no-direct-matches">No direct matches found between these teams in the historical data.</p>
+        </div>
+    `;
+    
     content.innerHTML = `
         ${navButtons}
         <div class="analysis-header">
@@ -952,6 +1029,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                 ${team2Position !== null ? `<span class="league-position" title="Position in current UCL league table">#${team2Position}</span>` : ''}
             </div>
         </div>
+        
+        ${directMatchesHtml}
         
         <div class="win-probability">
             <h3>Win Probability</h3>
@@ -1040,47 +1119,85 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         </div>
         
         <div class="matches-section">
-            <h3>Match History</h3>
-            ${fullLeagueTable.map((team, index) => {
-                const isTeam1 = team.teamId === team1.id;
-                const isTeam2 = team.teamId === team2.id;
-                const isPlayoffTeam = isTeam1 || isTeam2;
+            <h3>Match History (All Teams)</h3>
+            ${(() => {
+                // Separate teams into playoff teams and other teams
+                const playoffTeams = [];
+                const otherTeams = [];
                 
-                if (team.matches && team.matches.length > 0) {
-                    const matchesList = team.matches.map(match => {
-                        const outcomeClass = match.outcome === 'win' ? 'match-win' : 
-                                            match.outcome === 'loss' ? 'match-loss' : 'match-draw';
-                        const outcomeIcon = match.outcome === 'win' ? '✓' : 
-                                           match.outcome === 'loss' ? '✗' : '=';
-                        const opponentCrest = match.opponentCrest 
-                            ? `<img src="${match.opponentCrest}" alt="${match.opponentName}" class="match-opponent-logo" onerror="this.style.display='none'">`
-                            : '<span class="match-opponent-logo-placeholder"></span>';
+                fullLeagueTable.forEach(team => {
+                    const isTeam1 = team.teamId === team1.id;
+                    const isTeam2 = team.teamId === team2.id;
+                    if (isTeam1 || isTeam2) {
+                        playoffTeams.push(team);
+                    } else {
+                        otherTeams.push(team);
+                    }
+                });
+                
+                // Sort playoff teams: team1 first, then team2
+                playoffTeams.sort((a, b) => {
+                    if (a.teamId === team1.id) return -1;
+                    if (b.teamId === team1.id) return 1;
+                    if (a.teamId === team2.id) return -1;
+                    if (b.teamId === team2.id) return 1;
+                    return 0;
+                });
+                
+                // Combine: playoff teams first, then other teams
+                const orderedTeams = [...playoffTeams, ...otherTeams];
+                
+                return orderedTeams.map((team, index) => {
+                    const isTeam1 = team.teamId === team1.id;
+                    const isTeam2 = team.teamId === team2.id;
+                    const isPlayoffTeam = isTeam1 || isTeam2;
+                    
+                    if (team.matches && team.matches.length > 0) {
+                        // Filter out direct matches between team1 and team2 (already shown above)
+                        const otherMatches = team.matches.filter(m => 
+                            !((m.opponentId === team2.id || String(m.opponentId) === String(team2.id)) && isTeam1) &&
+                            !((m.opponentId === team1.id || String(m.opponentId) === String(team1.id)) && isTeam2)
+                        );
+                        
+                        if (otherMatches.length === 0) {
+                            return '';
+                        }
+                        
+                        const matchesList = otherMatches.map(match => {
+                            const outcomeClass = match.outcome === 'win' ? 'match-win' : 
+                                                match.outcome === 'loss' ? 'match-loss' : 'match-draw';
+                            const outcomeIcon = match.outcome === 'win' ? '✓' : 
+                                               match.outcome === 'loss' ? '✗' : '=';
+                            const opponentCrest = match.opponentCrest 
+                                ? `<img src="${match.opponentCrest}" alt="${match.opponentName}" class="match-opponent-logo" onerror="this.style.display='none'">`
+                                : '<span class="match-opponent-logo-placeholder"></span>';
+                            
+                            return `
+                                <div class="match-item ${outcomeClass}">
+                                    ${opponentCrest}
+                                    <span class="match-opponent">${match.opponentName}</span>
+                                    <span class="match-score">${match.teamScore}-${match.opponentScore}</span>
+                                    <span class="match-outcome">${outcomeIcon}</span>
+                                    <span class="match-date">${match.date ? new Date(match.date).toLocaleDateString() : ''}</span>
+                                </div>
+                            `;
+                        }).join('');
                         
                         return `
-                            <div class="match-item ${outcomeClass}">
-                                ${opponentCrest}
-                                <span class="match-opponent">${match.opponentName}</span>
-                                <span class="match-score">${match.teamScore}-${match.opponentScore}</span>
-                                <span class="match-outcome">${outcomeIcon}</span>
-                                <span class="match-date">${match.date ? new Date(match.date).toLocaleDateString() : ''}</span>
+                            <div class="team-matches ${isPlayoffTeam ? 'playoff-team-matches' : ''}">
+                                <h4 class="team-matches-header">
+                                    ${team.teamCrest ? `<img src="${team.teamCrest}" alt="${team.teamName}" class="team-matches-logo">` : ''}
+                                    <strong>${team.teamName}</strong> (${otherMatches.length} match${otherMatches.length !== 1 ? 'es' : ''})
+                                </h4>
+                                <div class="matches-list">
+                                    ${matchesList}
+                                </div>
                             </div>
                         `;
-                    }).join('');
-                    
-                    return `
-                        <div class="team-matches ${isPlayoffTeam ? 'playoff-team-matches' : ''}">
-                            <h4 class="team-matches-header">
-                                ${team.teamCrest ? `<img src="${team.teamCrest}" alt="${team.teamName}" class="team-matches-logo">` : ''}
-                                <strong>${team.teamName}</strong> (${team.matches.length} match${team.matches.length !== 1 ? 'es' : ''})
-                            </h4>
-                            <div class="matches-list">
-                                ${matchesList}
-                            </div>
-                        </div>
-                    `;
-                }
-                return '';
-            }).filter(html => html !== '').join('')}
+                    }
+                    return '';
+                }).filter(html => html !== '').join('');
+            })()}
         </div>
         ` : ''}
     `;

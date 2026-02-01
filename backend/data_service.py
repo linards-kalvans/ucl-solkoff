@@ -4,6 +4,9 @@ from datetime import datetime
 from typing import Dict, Any, List
 from backend.database import Database
 from backend.api_client import APIClient
+from backend.github_data_fetcher import GitHubDataFetcher
+from backend.football_txt_parser import FootballTxtParser
+from backend.team_matcher import TeamMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,9 @@ class DataService:
         """
         self.db = db
         self.api_client = api_client
+        self.github_fetcher = GitHubDataFetcher(cache_dir="./data/github_cache")
+        self.txt_parser = FootballTxtParser()
+        self.team_matcher = TeamMatcher(db)
     
     def sync_teams(self, competition_id: str = "CL"):
         """Sync teams from API to database.
@@ -269,7 +275,7 @@ class DataService:
             "UCL": "Conference League"
         }
         
-        logger.info(f"Starting historical data sync for {years_back} years (delay: {delay_between_requests}s between requests)")
+        logger.info(f"Starting historical data sync for {years_back} years")
         
         # Count how many seasons we actually need to fetch
         seasons_to_fetch = []
@@ -292,150 +298,304 @@ class DataService:
                 # Consider a season complete if we have at least 50 matches (reasonable threshold)
                 # This accounts for partial data or incomplete seasons
                 if existing_matches < 50:
-                    seasons_to_fetch.append((comp_id, comp_name, season_year))
-        
-        total_requests = len(seasons_to_fetch)
-        estimated_time = total_requests * delay_between_requests / 60
-        logger.info(f"Found {total_requests} seasons to fetch (estimated time: ~{estimated_time:.1f} minutes)")
-        
-        for idx, (comp_id, comp_name, season_year) in enumerate(seasons_to_fetch):
-            try:
-                logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1}")
-                
-                # Add delay before making the request (except for the first one)
-                if idx > 0:
-                    time.sleep(delay_between_requests)
-                
-                matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
-                
-                if "matches" not in matches_data:
-                    logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
-                    continue
-                
-                matches_inserted = 0
-                matches_skipped = 0
-                
-                for match in matches_data["matches"]:
-                        match_id = match.get("id")
-                        home_team = match.get("homeTeam", {})
-                        away_team = match.get("awayTeam", {})
-                        
-                        home_team_id = home_team.get("id")
-                        away_team_id = away_team.get("id")
-                        
-                        if not match_id or not home_team_id or not away_team_id:
-                            matches_skipped += 1
+                    # Determine if this is current season (use API) or historical (use GitHub)
+                    is_current_season = (season_year == current_season_start)
+                    # For historical seasons, check if GitHub has data before adding to fetch list
+                    if not is_current_season:
+                        season_str = f"{season_year}-{str(season_year + 1)[-2:]}"
+                        if not self.github_fetcher.check_season_exists(season_str):
+                            logger.debug(f"Skipping {comp_name} season {season_str} - not available in GitHub")
                             continue
-                        
-                        # Store teams
-                        try:
-                            # Prefer tla (3-letter code), fallback to shortName
-                            home_code = home_team.get("tla") or home_team.get("shortName")
-                            away_code = away_team.get("tla") or away_team.get("shortName")
-                            
-                            self.db.execute("""
-                                INSERT INTO teams (id, name, code, crest)
-                                VALUES (?, ?, ?, ?)
-                                ON CONFLICT (id) DO UPDATE SET
-                                    name = EXCLUDED.name,
-                                    code = EXCLUDED.code,
-                                    crest = EXCLUDED.crest
-                            """, (
-                                home_team_id,
-                                home_team.get("name"),
-                                home_code,
-                                home_team.get("crest")
-                            ))
-                            self.db.execute("""
-                                INSERT INTO teams (id, name, code, crest)
-                                VALUES (?, ?, ?, ?)
-                                ON CONFLICT (id) DO UPDATE SET
-                                    name = EXCLUDED.name,
-                                    code = EXCLUDED.code,
-                                    crest = EXCLUDED.crest
-                            """, (
-                                away_team_id,
-                                away_team.get("name"),
-                                away_code,
-                                away_team.get("crest")
-                            ))
-                        except Exception as e:
-                            logger.debug(f"Error storing teams for match {match_id}: {e}")
-                        
-                        # Extract match details
-                        full_time = match.get("score", {}).get("fullTime", {})
-                        stage = match.get("stage")
-                        round_info = match.get("round")
-                        if isinstance(round_info, dict):
-                            round_name = round_info.get("name") or round_info.get("round")
-                        else:
-                            round_name = round_info
-                        
-                        group_info = match.get("group")
-                        if isinstance(group_info, dict):
-                            group_name = group_info.get("name") or group_info.get("group")
-                        else:
-                            group_name = group_info
-                        
-                        try:
-                            self.db.execute("""
-                                INSERT INTO matches (
-                                    id, home_team_id, away_team_id, home_score, away_score,
-                                    matchday, date, status, stage, round, group_name, competition_id
-                                )
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                ON CONFLICT (id) DO UPDATE SET
-                                    home_score = excluded.home_score,
-                                    away_score = excluded.away_score,
-                                    status = excluded.status,
-                                    stage = excluded.stage,
-                                    round = excluded.round,
-                                    group_name = excluded.group_name,
-                                    competition_id = excluded.competition_id
-                            """, (
-                                match_id,
-                                home_team_id,
-                                away_team_id,
-                                full_time.get("home"),
-                                full_time.get("away"),
-                                match.get("matchday"),
-                                match.get("utcDate"),
-                                match.get("status"),
-                                stage,
-                                round_name,
-                                group_name,
-                                comp_id
-                            ))
-                            matches_inserted += 1
-                        except Exception as e:
-                            logger.debug(f"Skipping match {match_id}: {e}")
-                            matches_skipped += 1
+                    seasons_to_fetch.append((comp_id, comp_name, season_year, is_current_season))
+        
+        total_seasons = len(seasons_to_fetch)
+        logger.info(f"Found {total_seasons} seasons to fetch")
+        
+        for idx, (comp_id, comp_name, season_year, is_current) in enumerate(seasons_to_fetch):
+            try:
+                logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1} ({'current' if is_current else 'historical'})")
                 
-                self.db.commit()
-                logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} (skipped {matches_skipped})")
-                
+                if is_current:
+                    # Use football-data.org API for current season
+                    if idx > 0:
+                        time.sleep(delay_between_requests)
+                    self._sync_season_from_api(comp_id, comp_name, season_year)
+                else:
+                    # Use GitHub for historical seasons
+                    self._sync_season_from_github(comp_id, comp_name, season_year)
+                    
             except Exception as e:
                 error_msg = str(e)
                 # Check if it's a rate limit error
                 if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
                     logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
-                    time.sleep(10)  # Wait longer on rate limit
-                    # Try to continue with next season instead of skipping
+                    time.sleep(10)
                     continue
                 else:
                     logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
-                    # For non-rate-limit errors, add normal delay and continue
                     time.sleep(delay_between_requests)
                     continue
-            
-            # Add extra delay between different competitions to avoid rate limiting
-            if idx < len(seasons_to_fetch) - 1:
-                next_comp_id, _, _ = seasons_to_fetch[idx + 1]
-                if next_comp_id != comp_id:
-                    logger.info(f"Completed {comp_name}. Waiting {delay_between_requests * 2}s before next competition...")
-                    time.sleep(delay_between_requests * 2)
         
         logger.info("Historical data sync completed")
+    
+    def _sync_season_from_api(self, comp_id: str, comp_name: str, season_year: int):
+        """Sync a season from football-data.org API.
+        
+        Args:
+            comp_id: Competition ID
+            comp_name: Competition name
+            season_year: Season start year
+        """
+        matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
+        
+        if "matches" not in matches_data:
+            logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
+            return
+        
+        matches_inserted = 0
+        matches_skipped = 0
+        
+        for match in matches_data["matches"]:
+            match_id = match.get("id")
+            home_team = match.get("homeTeam", {})
+            away_team = match.get("awayTeam", {})
+            
+            home_team_id = home_team.get("id")
+            away_team_id = away_team.get("id")
+            
+            if not match_id or not home_team_id or not away_team_id:
+                matches_skipped += 1
+                continue
+            
+            # Store teams
+            try:
+                # Prefer tla (3-letter code), fallback to shortName
+                home_code = home_team.get("tla") or home_team.get("shortName")
+                away_code = away_team.get("tla") or away_team.get("shortName")
+                
+                self.db.execute("""
+                    INSERT INTO teams (id, name, code, crest)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = excluded.name,
+                        code = excluded.code,
+                        crest = excluded.crest
+                """, (
+                    home_team_id,
+                    home_team.get("name"),
+                    home_code,
+                    home_team.get("crest")
+                ))
+                self.db.execute("""
+                    INSERT INTO teams (id, name, code, crest)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = excluded.name,
+                        code = excluded.code,
+                        crest = excluded.crest
+                """, (
+                    away_team_id,
+                    away_team.get("name"),
+                    away_code,
+                    away_team.get("crest")
+                ))
+            except Exception as e:
+                logger.debug(f"Error storing teams for match {match_id}: {e}")
+            
+            # Extract match details
+            full_time = match.get("score", {}).get("fullTime", {})
+            stage = match.get("stage")
+            round_info = match.get("round")
+            if isinstance(round_info, dict):
+                round_name = round_info.get("name") or round_info.get("round")
+            else:
+                round_name = round_info
+            
+            group_info = match.get("group")
+            if isinstance(group_info, dict):
+                group_name = group_info.get("name") or group_info.get("group")
+            else:
+                group_name = group_info
+            
+            try:
+                self.db.execute("""
+                    INSERT INTO matches (
+                        id, home_team_id, away_team_id, home_score, away_score,
+                        matchday, date, status, stage, round, group_name, competition_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        home_score = excluded.home_score,
+                        away_score = excluded.away_score,
+                        status = excluded.status,
+                        stage = excluded.stage,
+                        round = excluded.round,
+                        group_name = excluded.group_name,
+                        competition_id = excluded.competition_id
+                """, (
+                    match_id,
+                    home_team_id,
+                    away_team_id,
+                    full_time.get("home"),
+                    full_time.get("away"),
+                    match.get("matchday"),
+                    match.get("utcDate"),
+                    match.get("status"),
+                    stage,
+                    round_name,
+                    group_name,
+                    comp_id
+                ))
+                matches_inserted += 1
+            except Exception as e:
+                logger.debug(f"Skipping match {match_id}: {e}")
+                matches_skipped += 1
+        
+        self.db.commit()
+        logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} from API (skipped {matches_skipped})")
+    
+    def _sync_season_from_github(self, comp_id: str, comp_name: str, season_year: int):
+        """Sync a season from GitHub openfootball repository.
+        
+        Args:
+            comp_id: Competition ID
+            comp_name: Competition name
+            season_year: Season start year
+        """
+        # Convert season year to format used by GitHub (e.g., 2023 -> "2023-24")
+        season_str = f"{season_year}-{str(season_year + 1)[-2:]}"
+        
+        # Fetch file from GitHub
+        content = self.github_fetcher.fetch_season_file(season_str, comp_id)
+        if not content:
+            logger.warning(f"Could not fetch {comp_name} season {season_str} from GitHub")
+            return
+        
+        # Parse the content
+        parsed_data = self.txt_parser.parse(content, competition=comp_id, season=season_str)
+        
+        if not parsed_data or not parsed_data.get("matches"):
+            logger.warning(f"No matches parsed from {comp_name} season {season_str}")
+            return
+        
+        matches_inserted = 0
+        matches_skipped = 0
+        teams_inserted = 0
+        
+        # Store teams first
+        for team_data in parsed_data.get("teams", []):
+            team_name = team_data.get("name")
+            if not team_name:
+                continue
+            
+            try:
+                team_id = self.team_matcher.find_or_create_team_id(team_name, comp_id)
+                if team_id:
+                    teams_inserted += 1
+            except Exception as e:
+                logger.debug(f"Error storing team {team_name}: {e}")
+        
+        # Store matches
+        for match_data in parsed_data.get("matches", []):
+            try:
+                home_team_name = match_data.get("home_team")
+                away_team_name = match_data.get("away_team")
+                
+                if not home_team_name or not away_team_name:
+                    matches_skipped += 1
+                    continue
+                
+                # Get or create team IDs
+                home_team_id = self.team_matcher.find_or_create_team_id(home_team_name, comp_id)
+                away_team_id = self.team_matcher.find_or_create_team_id(away_team_name, comp_id)
+                
+                if not home_team_id or not away_team_id:
+                    matches_skipped += 1
+                    continue
+                
+                # Generate synthetic match ID (negative to avoid conflicts with API IDs)
+                # Use hash of teams + date for consistency
+                match_key = f"{home_team_id}_{away_team_id}_{match_data.get('date', '')}"
+                match_id = abs(hash(match_key)) % (10 ** 9)  # 9-digit ID
+                match_id = -match_id  # Make negative to avoid conflicts
+                
+                # Parse date
+                match_date = match_data.get("date")
+                if not match_date:
+                    # Try to infer approximate date from season and round
+                    # Use a default date based on season and round
+                    # This is a fallback - ideally all matches should have dates
+                    if match_data.get("round"):
+                        round_name = match_data.get("round", "").lower()
+                        # Approximate dates for knockout rounds
+                        if "round of 16" in round_name or "last 16" in round_name:
+                            match_date = f"{season_year + 1}-02-15"  # Mid-February
+                        elif "quarter" in round_name:
+                            match_date = f"{season_year + 1}-04-01"  # Early April
+                        elif "semi" in round_name:
+                            match_date = f"{season_year + 1}-04-25"  # Late April
+                        elif "final" in round_name:
+                            match_date = f"{season_year + 1}-05-28"  # Late May
+                    else:
+                        # Group stage - use mid-season date
+                        match_date = f"{season_year}-10-15"
+                    
+                    if not match_date:
+                        matches_skipped += 1
+                        continue
+                
+                # Determine matchday from stage/round
+                matchday = None
+                if match_data.get("stage") == "GROUP_STAGE":
+                    matchday = 1  # Default for group stage
+                elif match_data.get("round"):
+                    # Assign matchday based on round
+                    round_name = match_data.get("round", "").lower()
+                    if "round of 16" in round_name or "last 16" in round_name:
+                        matchday = 7
+                    elif "quarter" in round_name:
+                        matchday = 8
+                    elif "semi" in round_name:
+                        matchday = 9
+                    elif "final" in round_name:
+                        matchday = 10
+                
+                self.db.execute("""
+                    INSERT INTO matches (
+                        id, home_team_id, away_team_id, home_score, away_score,
+                        matchday, date, status, stage, round, group_name, competition_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        home_score = excluded.home_score,
+                        away_score = excluded.away_score,
+                        status = excluded.status,
+                        stage = excluded.stage,
+                        round = excluded.round,
+                        group_name = excluded.group_name,
+                        competition_id = excluded.competition_id
+                """, (
+                    match_id,
+                    home_team_id,
+                    away_team_id,
+                    match_data.get("home_score"),
+                    match_data.get("away_score"),
+                    matchday,
+                    match_date,
+                    match_data.get("status", "FINISHED"),
+                    match_data.get("stage"),
+                    match_data.get("round"),
+                    match_data.get("group_name"),
+                    comp_id
+                ))
+                matches_inserted += 1
+                
+            except Exception as e:
+                logger.debug(f"Error storing match: {e}")
+                matches_skipped += 1
+        
+        self.db.commit()
+        logger.info(f"Synced {matches_inserted} matches and {teams_inserted} teams for {comp_name} season {season_str} from GitHub (skipped {matches_skipped})")
     
     def sync_all(self, competition_id: str = "CL"):
         """Sync all data (teams, matches, standings).
