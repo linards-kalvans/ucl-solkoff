@@ -237,7 +237,7 @@ class DataService:
         self.db.commit()
         logger.info(f"Synced {standings_inserted} standings, skipped {standings_skipped} invalid entries")
     
-    def sync_historical_matches(self, years_back: int = 10):
+    def sync_historical_matches(self, years_back: int = 10, delay_between_requests: float = 3.0):
         """Sync historical matches from European competitions for the past N years.
         
         Fetches matches from:
@@ -247,8 +247,10 @@ class DataService:
         
         Args:
             years_back: Number of years to look back (default: 10)
+            delay_between_requests: Delay in seconds between API requests (default: 3.0)
         """
         from datetime import datetime
+        import time
         
         current_year = datetime.now().year
         current_season_start = current_year if datetime.now().month >= 8 else current_year - 1
@@ -260,7 +262,11 @@ class DataService:
             "EC": "Conference League"
         }
         
-        logger.info(f"Starting historical data sync for {years_back} years")
+        logger.info(f"Starting historical data sync for {years_back} years (delay: {delay_between_requests}s between requests)")
+        
+        total_requests = (years_back + 1) * len(competitions)
+        estimated_time = total_requests * delay_between_requests / 60
+        logger.info(f"Estimated time: ~{estimated_time:.1f} minutes for {total_requests} API requests")
         
         for comp_id, comp_name in competitions.items():
             logger.info(f"Syncing historical matches for {comp_name} ({comp_id})")
@@ -271,6 +277,11 @@ class DataService:
                 
                 try:
                     logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1}")
+                    
+                    # Add delay before making the request (except for the first one)
+                    if year_offset > 0 or comp_id != "CL":
+                        time.sleep(delay_between_requests)
+                    
                     matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
                     
                     if "matches" not in matches_data:
@@ -375,13 +386,24 @@ class DataService:
                     self.db.commit()
                     logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} (skipped {matches_skipped})")
                     
-                    # Add a small delay to avoid rate limiting
-                    import time
-                    time.sleep(0.5)
-                    
                 except Exception as e:
-                    logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
-                    continue
+                    error_msg = str(e)
+                    # Check if it's a rate limit error
+                    if "429" in error_msg or "rate limit" in error_msg.lower() or "Too Many Requests" in error_msg:
+                        logger.warning(f"Rate limited for {comp_name} season {season_year}/{season_year+1}. Waiting 10 seconds before continuing...")
+                        time.sleep(10)  # Wait longer on rate limit
+                        # Try to continue with next season instead of skipping
+                        continue
+                    else:
+                        logger.warning(f"Error syncing {comp_name} season {season_year}/{season_year+1}: {e}")
+                        # For non-rate-limit errors, add normal delay and continue
+                        time.sleep(delay_between_requests)
+                        continue
+            
+            # Add extra delay between competitions to avoid rate limiting
+            if comp_id != "EC":  # Don't delay after the last competition
+                logger.info(f"Completed {comp_name}. Waiting {delay_between_requests * 2}s before next competition...")
+                time.sleep(delay_between_requests * 2)
         
         logger.info("Historical data sync completed")
     

@@ -231,17 +231,21 @@ async def refresh_data():
 
 
 @app.post("/api/refresh-historical")
-async def refresh_historical_data(years_back: int = 10):
+async def refresh_historical_data(years_back: int = 10, delay: float = 3.0):
     """Manually trigger historical data sync from European competitions.
     
     Args:
         years_back: Number of years to look back (default: 10)
+        delay: Delay in seconds between API requests (default: 3.0, minimum: 1.0)
     
     Returns:
         Success message
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    # Enforce minimum delay to prevent rate limiting
+    delay = max(1.0, delay)
     
     try:
         from backend.api_client import APIClient
@@ -254,10 +258,13 @@ async def refresh_historical_data(years_back: int = 10):
         api_client = APIClient(cache=api_cache, use_cache=True)
         data_service = DataService(db, api_client)
         
-        logger.info(f"Starting historical data sync for {years_back} years")
-        data_service.sync_historical_matches(years_back=years_back)
+        logger.info(f"Starting historical data sync for {years_back} years with {delay}s delay between requests")
+        data_service.sync_historical_matches(years_back=years_back, delay_between_requests=delay)
         
-        return {"message": f"Historical data sync completed for {years_back} years"}
+        return {
+            "message": f"Historical data sync completed for {years_back} years",
+            "delay_used": delay
+        }
     except Exception as e:
         logger.error(f"Error syncing historical data: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error syncing historical data: {str(e)}")
