@@ -102,7 +102,7 @@ def test_sync_matches(data_service, mock_db, mock_api_client):
     # Check that correct parameters were passed
     call_args = mock_db.execute.call_args
     assert "INSERT INTO matches" in call_args[0][0]
-    assert len(call_args[0][1]) == 8  # 8 parameters
+    assert len(call_args[0][1]) == 11  # 11 parameters (id, home_team_id, away_team_id, home_score, away_score, matchday, date, status, stage, round, group_name)
 
 
 def test_sync_standings(data_service, mock_db, mock_api_client):

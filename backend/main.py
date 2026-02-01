@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from backend.database import Database
 from backend.scheduler import DataScheduler
 from backend.api_cache import APICache
+from backend.playoff_analyzer import PlayoffAnalyzer
 
 load_dotenv()
 
@@ -108,6 +109,12 @@ if os.path.exists(frontend_path):
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
         
+        # For SPA routing, serve index.html for non-API routes
+        if not filename.startswith("api/"):
+            index_path = os.path.join(frontend_path, "index.html")
+            if os.path.exists(index_path):
+                return FileResponse(index_path)
+        
         raise HTTPException(status_code=404, detail="Not found")
 else:
     @app.get("/")
@@ -134,6 +141,7 @@ async def get_standings() -> List[Dict[str, Any]]:
     
     try:
         # Get standings with Solkoff coefficients
+        # Solkoff is now average PPG of opponents, Strength is (points % * solkoff)
         results = db.fetchall("""
             SELECT 
                 s.team_id,
@@ -149,8 +157,12 @@ async def get_standings() -> List[Dict[str, Any]]:
                 s.goals_against,
                 s.goal_difference,
                 s.points,
-                COALESCE(sc.solkoff_value, 0) as solkoff_coefficient,
-                s.points * COALESCE(sc.solkoff_value, 0) as strength_score
+                CAST(COALESCE(sc.solkoff_value, 0) AS REAL) as solkoff_coefficient,
+                CASE 
+                    WHEN s.played > 0 THEN 
+                        (s.points * 100.0 / (s.played * 3)) * CAST(COALESCE(sc.solkoff_value, 0) AS REAL) / 100.0
+                    ELSE 0
+                END as strength_score
             FROM standings s
             JOIN teams t ON s.team_id = t.id
             LEFT JOIN solkoff_coefficients sc ON s.team_id = sc.team_id
@@ -173,8 +185,8 @@ async def get_standings() -> List[Dict[str, Any]]:
                 "ga": row[10],
                 "gd": row[11],
                 "points": row[12],
-                "solkoffCoefficient": row[13],
-                "strengthScore": row[14] or 0
+                "solkoffCoefficient": float(row[13]) if row[13] is not None else 0.0,
+                "strengthScore": float(row[14]) if row[14] is not None else 0.0
             })
         
         return standings
@@ -252,9 +264,9 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
             WHERE team_id = ?
         """, (team_id,))
         
-        solkoff_value = solkoff_result[0] if solkoff_result and solkoff_result[0] is not None else 0
+        solkoff_value = float(solkoff_result[0]) if solkoff_result and solkoff_result[0] is not None else 0.0
         
-        # Get opponent details with their points and match outcomes
+        # Get opponent details with their points per game and match outcomes
         # First get all opponents from home matches with scores
         home_opponents = db.fetchall("""
             SELECT 
@@ -262,6 +274,7 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
                 t2.name as opponent_team_name,
                 t2.crest as opponent_team_crest,
                 COALESCE(s2.points, 0) as opponent_points,
+                COALESCE(s2.played, 0) as opponent_played,
                 m.home_score,
                 m.away_score,
                 m.date
@@ -279,6 +292,7 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
                 t2.name as opponent_team_name,
                 t2.crest as opponent_team_crest,
                 COALESCE(s2.points, 0) as opponent_points,
+                COALESCE(s2.played, 0) as opponent_played,
                 m.home_score,
                 m.away_score,
                 m.date
@@ -295,9 +309,11 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
         # Process home matches
         for row in home_opponents:
             opp_id = row[0]
-            home_score = row[4]
-            away_score = row[5]
-            match_date = row[6]
+            opp_points = row[3]
+            opp_played = row[4]
+            home_score = row[5]
+            away_score = row[6]
+            match_date = row[7]
             
             # Home match: team is home
             team_score = home_score
@@ -318,7 +334,9 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
                     'teamId': row[0],
                     'teamName': row[1],
                     'teamCrest': row[2],
-                    'points': row[3],
+                    'points': opp_points,
+                    'played': opp_played,
+                    'pointsPerGame': (opp_points / opp_played) if opp_played > 0 else 0.0,
                     'matchesPlayed': 0,
                     'matches': []
                 }
@@ -337,9 +355,11 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
         # Process away matches
         for row in away_opponents:
             opp_id = row[0]
-            home_score = row[4]
-            away_score = row[5]
-            match_date = row[6]
+            opp_points = row[3]
+            opp_played = row[4]
+            home_score = row[5]
+            away_score = row[6]
+            match_date = row[7]
             
             # Away match: team is away
             team_score = away_score
@@ -360,7 +380,9 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
                     'teamId': row[0],
                     'teamName': row[1],
                     'teamCrest': row[2],
-                    'points': row[3],
+                    'points': opp_points,
+                    'played': opp_played,
+                    'pointsPerGame': (opp_points / opp_played) if opp_played > 0 else 0.0,
                     'matchesPlayed': 0,
                     'matches': []
                 }
@@ -377,14 +399,15 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
             })
         
         opponents_data = list(opponents_dict.values())
-        opponents_data.sort(key=lambda x: (-x['points'], x['teamName']))
+        opponents_data.sort(key=lambda x: (-x.get('pointsPerGame', 0), x['teamName']))
         
         # Format opponents data
         opponents = opponents_data
         total_matches = sum(opp['matchesPlayed'] for opp in opponents)
         
-        # Calculate total opponent points (should match solkoff_value)
-        total_opponent_points = sum(opp["points"] for opp in opponents)
+        # Calculate average PPG of opponents (should match solkoff_value)
+        opponent_ppg_list = [opp.get('pointsPerGame', 0) for opp in opponents if opp.get('played', 0) > 0]
+        avg_opponent_ppg = sum(opponent_ppg_list) / len(opponent_ppg_list) if opponent_ppg_list else 0.0
         
         return {
             "teamId": team_info[0],
@@ -393,7 +416,7 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
             "teamCrest": team_info[3],
             "solkoffCoefficient": solkoff_value,
             "opponents": opponents,
-            "totalOpponentPoints": total_opponent_points,
+            "averageOpponentPPG": round(avg_opponent_ppg, 3),
             "matchesCount": total_matches,
             "opponentsCount": len(opponents)
         }
@@ -402,6 +425,178 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Error fetching Solkoff details for team {team_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/playoff-pairs")
+async def get_playoff_pairs() -> List[Dict[str, Any]]:
+    """Get current play-off pairs from the competition (all stages).
+    
+    Returns:
+        List of play-off pairs
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        from backend.api_client import APIClient
+        api_client = APIClient()
+        analyzer = PlayoffAnalyzer(db, api_client)
+        
+        pairs = analyzer.get_playoff_pairs()
+        logger.info(f"Found {len(pairs)} play-off pairs")
+        return pairs
+    except Exception as e:
+        logger.error(f"Error fetching play-off pairs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/tournament/current-stage")
+async def get_current_stage() -> Dict[str, Any]:
+    """Get the current tournament stage.
+    
+    Returns:
+        Dictionary with 'stage' field indicating current stage:
+        'LEAGUE', 'KNOCKOUT_PLAYOFF', 'ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL'
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        from backend.api_client import APIClient
+        api_client = APIClient()
+        analyzer = PlayoffAnalyzer(db, api_client)
+        
+        current_stage = analyzer.get_current_stage()
+        logger.info(f"Current tournament stage: {current_stage}")
+        return {"stage": current_stage}
+    except Exception as e:
+        logger.error(f"Error determining current stage: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/debug/knockout-matches")
+async def debug_knockout_matches() -> Dict[str, Any]:
+    """Debug endpoint to see what knockout matches are in the database."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        # Get all non-league matches
+        matches = db.fetchall("""
+            SELECT 
+                m.id,
+                m.stage,
+                m.round,
+                m.matchday,
+                m.date,
+                m.status,
+                m.group_name,
+                t1.name as home_team,
+                t2.name as away_team
+            FROM matches m
+            JOIN teams t1 ON m.home_team_id = t1.id
+            JOIN teams t2 ON m.away_team_id = t2.id
+            WHERE (m.stage IS NOT NULL AND m.stage != 'LEAGUE_STAGE') 
+               OR (m.stage IS NULL AND m.matchday >= 7 AND (m.group_name IS NULL OR m.group_name = ''))
+            ORDER BY m.matchday, m.date
+            LIMIT 50
+        """)
+        
+        result = {
+            "total_matches": len(matches),
+            "matches": [
+                {
+                    "id": m[0],
+                    "stage": m[1],
+                    "round": m[2],
+                    "matchday": m[3],
+                    "date": m[4],
+                    "status": m[5],
+                    "group_name": m[6],
+                    "home_team": m[7],
+                    "away_team": m[8]
+                }
+                for m in matches
+            ]
+        }
+        return result
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/knockout-pairs/{stage}")
+async def get_knockout_pairs_by_stage(stage: str) -> List[Dict[str, Any]]:
+    """Get play-off pairs for a specific stage.
+    
+    Args:
+        stage: Stage identifier ('KNOCKOUT_PLAYOFF', 'ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL')
+    
+    Returns:
+        List of play-off pairs for the specified stage
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    valid_stages = ['KNOCKOUT_PLAYOFF', 'ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL']
+    if stage.upper() not in valid_stages:
+        raise HTTPException(status_code=400, detail=f"Invalid stage. Must be one of: {', '.join(valid_stages)}")
+    
+    try:
+        from backend.api_client import APIClient
+        from backend.uefa_draws_scraper import UEFADrawsScraper
+        
+        api_client = APIClient()
+        analyzer = PlayoffAnalyzer(db, api_client)
+        
+        # First try to get pairs from database (actual matches)
+        pairs = analyzer.get_pairs_by_stage(stage.upper())
+        
+        # If no pairs found, try to get draw information from UEFA
+        if len(pairs) == 0:
+            try:
+                scraper = UEFADrawsScraper()
+                draws = scraper.get_knockout_draws()
+                
+                # Check if we have draw information for this stage
+                stage_draw = next((d for d in draws if d["stage"] == stage.upper()), None)
+                if stage_draw:
+                    logger.info(f"Found draw information for {stage}: {stage_draw.get('drawDateDisplay', 'N/A')}")
+                    # Log draw date - pairs will be available after the draw
+            except Exception as scrape_error:
+                logger.debug(f"Could not fetch UEFA draw info: {scrape_error}")
+        
+        logger.info(f"Found {len(pairs)} pairs for stage {stage}")
+        return pairs
+    except Exception as e:
+        logger.error(f"Error fetching pairs for stage {stage}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/playoff-pairs/{team1_id}/{team2_id}/analysis")
+async def get_playoff_analysis(team1_id: int, team2_id: int) -> Dict[str, Any]:
+    """Get play-off pair analysis with league table based on common opponents.
+    
+    Args:
+        team1_id: First team ID
+        team2_id: Second team ID
+        
+    Returns:
+        Analysis with league table
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        from backend.api_client import APIClient
+        api_client = APIClient()
+        analyzer = PlayoffAnalyzer(db, api_client)
+        
+        analysis = analyzer.analyze_pair(team1_id, team2_id)
+        return analysis
+    except Exception as e:
+        logger.error(f"Error analyzing play-off pair: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

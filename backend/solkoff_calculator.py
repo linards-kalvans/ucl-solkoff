@@ -5,7 +5,7 @@ from backend.database import Database
 
 
 class SolkoffCalculator:
-    """Calculates Solkoff coefficients (sum of opponent points)."""
+    """Calculates Solkoff coefficients (average PPG of opponents)."""
     
     def __init__(self, db: Database):
         """Initialize calculator.
@@ -46,33 +46,44 @@ class SolkoffCalculator:
         
         return opponents
     
-    def calculate_solkoff(self, team_id: int) -> int:
+    def calculate_solkoff(self, team_id: int) -> float:
         """Calculate Solkoff coefficient for a team.
         
-        Solkoff coefficient = sum of points earned by all opponents faced.
+        Solkoff coefficient = average points per game of all opponents faced.
         
         Args:
             team_id: Team ID
             
         Returns:
-            Solkoff coefficient value
+            Solkoff coefficient value (average PPG of opponents)
         """
         opponents = self.get_opponents(team_id)
         
         if not opponents:
-            return 0
+            return 0.0
         
-        # Get points for all opponents
+        # Get points and games played for all opponents
         placeholders = ','.join(['?'] * len(opponents))
-        opponent_points = self.db.fetchall(f"""
-            SELECT points FROM standings
+        opponent_stats = self.db.fetchall(f"""
+            SELECT points, played FROM standings
             WHERE team_id IN ({placeholders})
         """, tuple(opponents))
         
-        # Sum all opponent points
-        solkoff_value = sum((row[0] if row and row[0] is not None else 0) for row in opponent_points)
+        # Calculate average points per game of opponents
+        opponent_ppg_list = []
+        for row in opponent_stats:
+            if row and row[0] is not None and row[1] is not None and row[1] > 0:
+                points = row[0] if row[0] is not None else 0
+                played = row[1] if row[1] is not None else 0
+                if played > 0:
+                    opponent_ppg_list.append(points / played)
         
-        return solkoff_value
+        if opponent_ppg_list:
+            solkoff_value = sum(opponent_ppg_list) / len(opponent_ppg_list)
+        else:
+            solkoff_value = 0.0
+        
+        return round(solkoff_value, 3)
     
     def calculate_all(self):
         """Calculate Solkoff coefficients for all teams and store in database."""

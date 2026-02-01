@@ -1,8 +1,11 @@
 """DuckDB database connection and schema management."""
 import os
+import logging
 import duckdb
 from typing import Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -49,10 +52,16 @@ class Database:
                 matchday INTEGER,
                 date TEXT,
                 status TEXT,
+                stage TEXT,
+                round TEXT,
+                group_name TEXT,
                 FOREIGN KEY (home_team_id) REFERENCES teams(id),
                 FOREIGN KEY (away_team_id) REFERENCES teams(id)
             )
         """)
+        
+        # Migration: Add new columns to existing matches table if they don't exist
+        self._migrate_matches_table()
         
         # Standings table
         self.conn.execute("""
@@ -76,13 +85,83 @@ class Database:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS solkoff_coefficients (
                 team_id INTEGER PRIMARY KEY,
-                solkoff_value INTEGER NOT NULL,
+                solkoff_value REAL NOT NULL,
                 calculated_at TEXT NOT NULL,
                 FOREIGN KEY (team_id) REFERENCES teams(id)
             )
         """)
         
+        # Migration: Update existing INTEGER column to REAL if needed
+        try:
+            # Check if table exists by trying to describe it
+            columns_info = self.conn.execute("DESCRIBE solkoff_coefficients").fetchall()
+            col_info = next((col for col in columns_info if col[0] == 'solkoff_value'), None)
+            if col_info:
+                col_type = str(col_info[1]).upper()
+                if 'INTEGER' in col_type:
+                    # DuckDB doesn't support ALTER COLUMN, so we need to recreate the table
+                    logger.info("Migrating solkoff_coefficients table: converting INTEGER to REAL")
+                    # Create new table with REAL type
+                    self.conn.execute("""
+                        CREATE TABLE IF NOT EXISTS solkoff_coefficients_new (
+                            team_id INTEGER PRIMARY KEY,
+                            solkoff_value REAL NOT NULL,
+                            calculated_at TEXT NOT NULL,
+                            FOREIGN KEY (team_id) REFERENCES teams(id)
+                        )
+                    """)
+                    # Copy data, converting INTEGER to REAL (though values will need recalculation)
+                    self.conn.execute("""
+                        INSERT INTO solkoff_coefficients_new (team_id, solkoff_value, calculated_at)
+                        SELECT team_id, CAST(solkoff_value AS REAL), calculated_at
+                        FROM solkoff_coefficients
+                    """)
+                    # Drop old table
+                    self.conn.execute("DROP TABLE solkoff_coefficients")
+                    # Rename new table
+                    self.conn.execute("ALTER TABLE solkoff_coefficients_new RENAME TO solkoff_coefficients")
+                    self.conn.commit()
+                    logger.info("Migration completed: solkoff_value is now REAL. Note: Values should be recalculated.")
+        except Exception as e:
+            # Table might not exist yet, which is fine
+            logger.debug(f"Could not migrate solkoff_coefficients schema (this is OK if table doesn't exist): {e}")
+        
         self.conn.commit()
+    
+    def _migrate_matches_table(self):
+        """Add new columns to existing matches table if they don't exist."""
+        try:
+            # Get column names from existing table using DuckDB's DESCRIBE
+            columns_info = self.conn.execute("DESCRIBE matches").fetchall()
+            existing_columns = {col[0] for col in columns_info}
+            
+            # Add stage column if missing
+            if 'stage' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE matches ADD COLUMN stage TEXT")
+                    logger.info("Added 'stage' column to matches table")
+                except Exception as e:
+                    logger.debug(f"Could not add 'stage' column: {e}")
+            
+            # Add round column if missing
+            if 'round' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE matches ADD COLUMN round TEXT")
+                    logger.info("Added 'round' column to matches table")
+                except Exception as e:
+                    logger.debug(f"Could not add 'round' column: {e}")
+            
+            # Add group_name column if missing
+            if 'group_name' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE matches ADD COLUMN group_name TEXT")
+                    logger.info("Added 'group_name' column to matches table")
+                except Exception as e:
+                    logger.debug(f"Could not add 'group_name' column: {e}")
+                    
+        except Exception as e:
+            # Table might not exist yet, which is fine (will be created by CREATE TABLE IF NOT EXISTS)
+            logger.debug(f"Could not check matches table columns (table may not exist yet): {e}")
     
     def execute(self, query: str, parameters: Optional[tuple] = None):
         """Execute a SQL query.

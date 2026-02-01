@@ -198,4 +198,34 @@ class APIClient:
             Team data
         """
         return self._make_request(f"teams/{team_id}")
+    
+    def get_competition_matches_by_stage(self, competition_id: str = "CL", stage: Optional[str] = None) -> Dict[str, Any]:
+        """Get matches for a competition, optionally filtered by stage.
+        
+        Args:
+            competition_id: Competition ID (default: "CL" for Champions League)
+            stage: Optional stage filter (e.g., "KNOCKOUT_OUT", "LEAGUE_STAGE")
+            
+        Returns:
+            Matches data
+        """
+        endpoint = f"competitions/{competition_id}/matches"
+        if stage:
+            endpoint += f"?stage={stage}"
+        return self._make_request(endpoint)
+    
+    def get_competition_matches_by_round(self, competition_id: str = "CL", round_filter: Optional[str] = None) -> Dict[str, Any]:
+        """Get matches for a competition, optionally filtered by round.
+        
+        Args:
+            competition_id: Competition ID (default: "CL" for Champions League)
+            round_filter: Optional round filter (e.g., "PLAY_OFF_ROUND", "ROUND_OF_16")
+            
+        Returns:
+            Matches data
+        """
+        endpoint = f"competitions/{competition_id}/matches"
+        if round_filter:
+            endpoint += f"?round={round_filter}"
+        return self._make_request(endpoint)
 

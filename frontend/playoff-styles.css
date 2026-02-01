@@ -1,0 +1,817 @@
+/* Play-off pairs section */
+.playoff-section {
+    margin-top: 40px;
+    padding: 30px;
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.playoff-section h2 {
+    margin: 0 0 10px 0;
+    color: #667eea;
+    font-size: 1.8em;
+}
+
+.section-description {
+    color: #6c757d;
+    margin-bottom: 25px;
+    font-size: 0.95em;
+}
+
+.playoff-pairs {
+    padding: 20px;
+    min-height: 200px;
+}
+
+.playoff-stage-section {
+    margin-bottom: 30px;
+}
+
+.stage-title {
+    margin: 0 0 15px 0;
+    color: #667eea;
+    font-size: 1.3em;
+    font-weight: 600;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #667eea;
+}
+
+.playoff-pairs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+}
+
+.playoff-pair-card {
+    background: #f8f9fa;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    padding: 20px;
+    transition: all 0.3s ease;
+}
+
+.playoff-pair-card:hover {
+    border-color: #667eea;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+    transform: translateY(-2px);
+}
+
+.pair-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 15px;
+    gap: 10px;
+    width: 100%;
+    min-width: 0; /* Allow flex items to shrink */
+}
+
+.pair-team {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 0; /* Equal flex, allow shrinking */
+    min-width: 0; /* Critical: allows text truncation */
+    overflow: hidden;
+}
+
+.pair-team-logo,
+.pair-team-logo-placeholder {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.pair-team-logo-placeholder {
+    display: inline-block;
+    background: #e0e0e0;
+    border-radius: 50%;
+}
+
+.pair-team-name {
+    font-weight: 600;
+    color: #333;
+    font-size: 0.9em;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.2;
+}
+
+.pair-vs {
+    font-weight: bold;
+    color: #667eea;
+    font-size: 1.1em;
+    flex-shrink: 0;
+    padding: 0 5px;
+}
+
+.pair-analyze-btn {
+    width: 100%;
+    padding: 12px;
+    background: #667eea;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-size: 0.95em;
+}
+
+.pair-analyze-btn:hover {
+    background: #5568d3;
+}
+
+.pair-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 10px 0;
+    padding: 8px;
+    background: #f0f0f0;
+    border-radius: 4px;
+    font-size: 0.85em;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pair-probability {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    padding: 8px;
+    background: #e7f3ff;
+    border-radius: 4px;
+    border-left: 3px solid #667eea;
+    font-size: 0.9em;
+}
+
+.probability-label {
+    font-weight: 600;
+    color: #333;
+    font-size: 0.85em;
+}
+
+.probability-value {
+    font-weight: bold;
+    color: #667eea;
+    font-size: 1em;
+}
+
+.probability-bar-mini {
+    width: 100%;
+    height: 6px;
+    background: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+    display: flex;
+}
+
+.probability-fill-mini {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.probability-fill-mini.team1 {
+    background: linear-gradient(90deg, #667eea 0%, #5568d3 100%);
+}
+
+.probability-fill-mini.team2 {
+    background: linear-gradient(90deg, #764ba2 0%, #5a3d7a 100%);
+}
+
+.status-badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.85em;
+}
+
+.status-badge.finished {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-badge.scheduled {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-badge.live {
+    background: #f8d7da;
+    color: #721c24;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+.pair-date {
+    color: #6c757d;
+}
+
+/* Play-off analysis modal */
+.playoff-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1000;
+}
+
+.modal-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+}
+
+.modal-content {
+    position: relative;
+    background: white;
+    margin: 50px auto;
+    max-width: 900px;
+    max-height: 90vh;
+    overflow-y: auto;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    animation: slideDown 0.3s ease-out;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 30px;
+    border-bottom: 2px solid #e9ecef;
+    position: sticky;
+    top: 0;
+    background: white;
+    z-index: 10;
+}
+
+.modal-header h2 {
+    margin: 0;
+    color: #667eea;
+    font-size: 1.5em;
+}
+
+.modal-close {
+    background: #dc3545;
+    color: white;
+    border: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-close:hover {
+    background: #c82333;
+}
+
+.analysis-content {
+    padding: 30px;
+}
+
+.analysis-navigation {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.nav-btn {
+    background: #667eea;
+    color: white;
+    border: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.nav-btn:hover:not(:disabled) {
+    background: #5568d3;
+    transform: scale(1.1);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.nav-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.nav-btn span {
+    line-height: 1;
+    font-weight: bold;
+}
+
+.pair-counter {
+    font-size: 16px;
+    font-weight: 600;
+    color: #667eea;
+    min-width: 60px;
+    text-align: center;
+}
+
+.analysis-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    margin-bottom: 30px;
+    padding: 20px;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.analysis-team {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    padding: 15px;
+    border-radius: 8px;
+    transition: all 0.3s;
+}
+
+.analysis-team.winner {
+    background: #d4edda;
+    border: 2px solid #28a745;
+}
+
+.analysis-team-logo {
+    width: 60px;
+    height: 60px;
+    object-fit: contain;
+}
+
+.analysis-team h3 {
+    margin: 0;
+    font-size: 1.2em;
+    color: #333;
+    text-align: center;
+}
+
+.analysis-team.winner h3 {
+    color: #155724;
+    font-weight: bold;
+}
+
+.league-position {
+    display: inline-block;
+    background: #667eea;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    font-weight: bold;
+    margin-top: 5px;
+}
+
+.analysis-team.winner .league-position {
+    background: #28a745;
+}
+
+.analysis-vs {
+    font-size: 1.5em;
+    font-weight: bold;
+    color: #667eea;
+    margin: 0 20px;
+}
+
+.analysis-info {
+    margin-bottom: 25px;
+    padding: 15px;
+    background: #e7f3ff;
+    border-left: 4px solid #667eea;
+    border-radius: 4px;
+}
+
+.analysis-info p {
+    margin: 5px 0;
+    color: #333;
+}
+
+.analysis-info .warning {
+    color: #856404;
+    font-weight: 600;
+    margin-top: 10px;
+}
+
+.league-table-container {
+    margin-top: 25px;
+}
+
+.league-table-container h3 {
+    margin: 0 0 15px 0;
+    color: #667eea;
+    font-size: 1.2em;
+}
+
+.playoff-league-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.playoff-league-table thead {
+    background: #667eea;
+    color: white;
+}
+
+.playoff-league-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.playoff-league-table tbody tr {
+    border-bottom: 1px solid #e9ecef;
+    transition: background 0.2s;
+}
+
+.playoff-league-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.playoff-league-table tbody tr.winner {
+    background: #d4edda;
+    font-weight: 600;
+}
+
+.playoff-league-table tbody tr.winner:hover {
+    background: #c3e6cb;
+}
+
+.playoff-league-table td {
+    padding: 12px;
+    text-align: left;
+}
+
+.playoff-league-table .team-cell {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.table-team-logo {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+}
+
+.playoff-league-table td:last-child {
+    font-weight: 600;
+    color: #28a745;
+    font-size: 1.1em;
+}
+
+.playoff-league-table tr.winner td:last-child {
+    color: #155724;
+}
+
+.playoff-league-table tr.playoff-team {
+    background: #fff3cd;
+    border-left: 3px solid #ffc107;
+}
+
+.playoff-league-table tr.playoff-team:hover {
+    background: #ffe69c;
+}
+
+/* Win probability section */
+.win-probability {
+    margin: 25px 0;
+    padding: 20px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 2px solid #667eea;
+}
+
+.win-probability h3 {
+    margin: 0 0 15px 0;
+    color: #667eea;
+    font-size: 1.2em;
+}
+
+.probability-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.probability-item {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.probability-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #333;
+}
+
+.probability-value {
+    color: #667eea;
+    font-size: 1.1em;
+}
+
+.probability-bar {
+    width: 100%;
+    height: 30px;
+    background: #e9ecef;
+    border-radius: 15px;
+    overflow: hidden;
+    position: relative;
+}
+
+.probability-fill {
+    height: 100%;
+    transition: width 0.5s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.team1-fill {
+    background: linear-gradient(90deg, #667eea 0%, #5568d3 100%);
+}
+
+.team2-fill {
+    background: linear-gradient(90deg, #764ba2 0%, #5a3d7a 100%);
+}
+
+.draw-fill {
+    background: linear-gradient(90deg, #ffc107 0%, #ff9800 100%);
+}
+
+.probability-note {
+    margin: 15px 0 0 0;
+    font-size: 0.85em;
+    color: #6c757d;
+    font-style: italic;
+    text-align: center;
+}
+
+.probability-explanation {
+    margin-top: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #667eea;
+}
+
+.probability-explanation h4 {
+    margin: 0 0 10px 0;
+    color: #667eea;
+    font-size: 1em;
+}
+
+.probability-explanation p {
+    margin: 8px 0;
+    color: #333;
+    font-size: 0.9em;
+    line-height: 1.5;
+}
+
+.probability-explanation ul {
+    margin: 10px 0 10px 20px;
+    color: #333;
+    font-size: 0.9em;
+}
+
+.probability-explanation li {
+    margin: 5px 0;
+}
+
+.table-note {
+    margin: 0 0 15px 0;
+    font-size: 0.9em;
+    color: #6c757d;
+    font-style: italic;
+}
+
+/* Matches section */
+.matches-section {
+    margin-top: 30px;
+    padding: 20px;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.matches-section h3 {
+    margin: 0 0 20px 0;
+    color: #667eea;
+    font-size: 1.2em;
+}
+
+.team-matches {
+    margin-bottom: 25px;
+    padding: 15px;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+}
+
+.team-matches.playoff-team-matches {
+    border: 2px solid #ffc107;
+    background: #fffbf0;
+}
+
+.team-matches-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 15px 0;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #e9ecef;
+    font-size: 1.1em;
+    color: #333;
+}
+
+.team-matches-logo {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+}
+
+.matches-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.match-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #6c757d;
+    transition: background 0.2s;
+}
+
+.match-item:hover {
+    background: #e9ecef;
+}
+
+.match-item.match-win {
+    border-left-color: #28a745;
+    background: #d4edda;
+}
+
+.match-item.match-draw {
+    border-left-color: #ffc107;
+    background: #fff3cd;
+}
+
+.match-item.match-loss {
+    border-left-color: #dc3545;
+    background: #f8d7da;
+}
+
+.match-opponent-logo,
+.match-opponent-logo-placeholder {
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.match-opponent-logo-placeholder {
+    display: inline-block;
+    background: #e0e0e0;
+    border-radius: 50%;
+}
+
+.match-opponent {
+    flex: 1;
+    font-weight: 600;
+    color: #333;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.match-score {
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+    font-size: 1.1em;
+    color: #333;
+    min-width: 50px;
+    text-align: center;
+}
+
+.match-outcome {
+    font-weight: bold;
+    font-size: 1.2em;
+    min-width: 20px;
+    text-align: center;
+}
+
+.match-item.match-win .match-outcome {
+    color: #28a745;
+}
+
+.match-item.match-draw .match-outcome {
+    color: #856404;
+}
+
+.match-item.match-loss .match-outcome {
+    color: #dc3545;
+}
+
+.match-date {
+    font-size: 0.85em;
+    color: #6c757d;
+    min-width: 80px;
+    text-align: right;
+}
+
+/* Loading and error states */
+.analysis-content .loading,
+.analysis-content .error {
+    padding: 40px;
+    text-align: center;
+    color: #6c757d;
+}
+
+.analysis-content .error {
+    color: #dc3545;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    .playoff-pairs {
+        grid-template-columns: 1fr;
+    }
+    
+    .modal-content {
+        margin: 20px;
+        max-width: calc(100% - 40px);
+    }
+    
+    .analysis-header {
+        flex-direction: column;
+        gap: 15px;
+    }
+    
+    .analysis-vs {
+        margin: 10px 0;
+    }
+    
+    .playoff-league-table {
+        font-size: 0.85em;
+    }
+    
+    .playoff-league-table th,
+    .playoff-league-table td {
+        padding: 8px;
+    }
+}
+

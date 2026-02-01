@@ -120,16 +120,33 @@ class DataService:
                 continue
             
             try:
+                # Extract stage, round, and group information from match
+                stage = match.get("stage")
+                round_info = match.get("round")  # Can be a string or object
+                if isinstance(round_info, dict):
+                    round_name = round_info.get("name") or round_info.get("round")
+                else:
+                    round_name = round_info
+                
+                group_info = match.get("group")
+                if isinstance(group_info, dict):
+                    group_name = group_info.get("name") or group_info.get("group")
+                else:
+                    group_name = group_info
+                
                 self.db.execute("""
                     INSERT INTO matches (
                         id, home_team_id, away_team_id, home_score, away_score,
-                        matchday, date, status
+                        matchday, date, status, stage, round, group_name
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                         home_score = excluded.home_score,
                         away_score = excluded.away_score,
-                        status = excluded.status
+                        status = excluded.status,
+                        stage = excluded.stage,
+                        round = excluded.round,
+                        group_name = excluded.group_name
                 """, (
                     match_id,
                     home_team_id,
@@ -138,7 +155,10 @@ class DataService:
                     full_time.get("away"),
                     match.get("matchday"),
                     match.get("utcDate"),
-                    match.get("status")
+                    match.get("status"),
+                    stage,
+                    round_name,
+                    group_name
                 ))
                 matches_inserted += 1
             except Exception as e:
@@ -223,5 +243,106 @@ class DataService:
         """
         self.sync_teams(competition_id)
         self.sync_matches(competition_id)
+        # Also try to fetch knockout stage matches if available
+        self.sync_knockout_matches(competition_id)
         self.sync_standings(competition_id)
+    
+    def sync_knockout_matches(self, competition_id: str = "CL"):
+        """Sync knockout stage matches from API.
+        
+        Tries to fetch matches for different knockout stages to get future draw information.
+        
+        Args:
+            competition_id: Competition ID
+        """
+        # Try different stage filters to get knockout matches
+        stages_to_try = [
+            "KNOCKOUT_OUT",
+            "KNOCKOUT_ROUND", 
+            None  # Get all matches which may include future knockout matches
+        ]
+        
+        for stage in stages_to_try:
+            try:
+                if stage:
+                    matches_data = self.api_client.get_competition_matches_by_stage(competition_id, stage)
+                else:
+                    matches_data = self.api_client.get_competition_matches(competition_id)
+                
+                if "matches" not in matches_data:
+                    continue
+                
+                matches_inserted = 0
+                for match in matches_data["matches"]:
+                    match_id = match.get("id")
+                    home_team = match.get("homeTeam", {})
+                    away_team = match.get("awayTeam", {})
+                    
+                    home_team_id = home_team.get("id")
+                    away_team_id = away_team.get("id")
+                    
+                    if not match_id or not home_team_id or not away_team_id:
+                        continue
+                    
+                    # Only process knockout stage matches
+                    match_stage = match.get("stage")
+                    if match_stage == "LEAGUE_STAGE":
+                        continue
+                    
+                    try:
+                        score = match.get("score", {})
+                        full_time = score.get("fullTime", {})
+                        
+                        round_info = match.get("round")
+                        if isinstance(round_info, dict):
+                            round_name = round_info.get("name") or round_info.get("round")
+                        else:
+                            round_name = round_info
+                        
+                        group_info = match.get("group")
+                        if isinstance(group_info, dict):
+                            group_name = group_info.get("name") or group_info.get("group")
+                        else:
+                            group_name = group_info
+                        
+                        self.db.execute("""
+                            INSERT INTO matches (
+                                id, home_team_id, away_team_id, home_score, away_score,
+                                matchday, date, status, stage, round, group_name
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT (id) DO UPDATE SET
+                                home_score = excluded.home_score,
+                                away_score = excluded.away_score,
+                                status = excluded.status,
+                                stage = excluded.stage,
+                                round = excluded.round,
+                                group_name = excluded.group_name,
+                                matchday = excluded.matchday,
+                                date = excluded.date
+                        """, (
+                            match_id,
+                            home_team_id,
+                            away_team_id,
+                            full_time.get("home"),
+                            full_time.get("away"),
+                            match.get("matchday"),
+                            match.get("utcDate"),
+                            match.get("status"),
+                            match_stage,
+                            round_name,
+                            group_name
+                        ))
+                        matches_inserted += 1
+                    except Exception as e:
+                        logger.debug(f"Skipping knockout match {match_id}: {e}")
+                        continue
+                
+                if matches_inserted > 0:
+                    self.db.commit()
+                    logger.info(f"Synced {matches_inserted} knockout matches from stage {stage or 'all'}")
+                    break  # If we got matches, no need to try other stages
+            except Exception as e:
+                logger.debug(f"Could not fetch matches for stage {stage}: {e}")
+                continue
 
