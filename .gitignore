@@ -12,6 +12,7 @@ env/
 # Database
 data/*.db
 data/*.db.wal
+data/*
 
 # Environment
 .env
