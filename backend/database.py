@@ -131,11 +131,52 @@ class Database:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS api_cache (
                 cache_key TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL,
                 response_data TEXT NOT NULL,
-                created_at TEXT NOT NULL,
+                cached_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             )
         """)
+        
+        # Migration: Add missing columns to existing api_cache table if needed
+        try:
+            columns_info = self.conn.execute("DESCRIBE api_cache").fetchall()
+            existing_columns = {col[0] for col in columns_info}
+            
+            # Add endpoint column if missing
+            if 'endpoint' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE api_cache ADD COLUMN endpoint TEXT")
+                    # Set default value for existing rows
+                    self.conn.execute("UPDATE api_cache SET endpoint = '' WHERE endpoint IS NULL")
+                    logger.info("Added 'endpoint' column to api_cache table")
+                except Exception as e:
+                    logger.debug(f"Could not add 'endpoint' column: {e}")
+            
+            # Migrate created_at to cached_at if needed
+            if 'created_at' in existing_columns and 'cached_at' not in existing_columns:
+                try:
+                    self.conn.execute("ALTER TABLE api_cache ADD COLUMN cached_at TEXT")
+                    # Copy data from created_at to cached_at
+                    self.conn.execute("UPDATE api_cache SET cached_at = created_at WHERE cached_at IS NULL")
+                    # Drop old column
+                    self.conn.execute("ALTER TABLE api_cache DROP COLUMN created_at")
+                    logger.info("Migrated 'created_at' to 'cached_at' in api_cache table")
+                except Exception as e:
+                    logger.debug(f"Could not migrate created_at to cached_at: {e}")
+            elif 'cached_at' not in existing_columns:
+                # If neither exists, add cached_at
+                try:
+                    self.conn.execute("ALTER TABLE api_cache ADD COLUMN cached_at TEXT")
+                    # Set default for existing rows
+                    self.conn.execute("UPDATE api_cache SET cached_at = CURRENT_TIMESTAMP::TEXT WHERE cached_at IS NULL")
+                    logger.info("Added 'cached_at' column to api_cache table")
+                except Exception as e:
+                    logger.debug(f"Could not add 'cached_at' column: {e}")
+                    
+        except Exception as e:
+            # Table might not exist yet, which is fine
+            logger.debug(f"Could not check api_cache table columns (table may not exist yet): {e}")
         
         self.conn.commit()
     
