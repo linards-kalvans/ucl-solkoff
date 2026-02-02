@@ -121,6 +121,8 @@
     cursor: pointer;
     transition: background 0.2s;
     font-size: 0.95em;
+    touch-action: manipulation; /* Prevent double-tap zoom */
+    min-height: 44px; /* iOS recommended touch target */
 }
 
 .pair-analyze-btn:hover {
@@ -250,6 +252,7 @@
     border-radius: 12px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
     animation: slideDown 0.3s ease-out;
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
 }
 
 .modal-header {
@@ -262,6 +265,8 @@
     top: 0;
     background: white;
     z-index: 10;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .modal-header h2 {
@@ -276,6 +281,8 @@
     border: none;
     width: 36px;
     height: 36px;
+    min-width: 36px; /* Ensure minimum touch target size */
+    min-height: 36px;
     border-radius: 50%;
     font-size: 24px;
     line-height: 1;
@@ -284,6 +291,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    touch-action: manipulation; /* Prevent double-tap zoom */
 }
 
 .modal-close:hover {
@@ -311,6 +319,8 @@
     border: none;
     width: 40px;
     height: 40px;
+    min-width: 44px; /* iOS recommended touch target */
+    min-height: 44px;
     border-radius: 50%;
     cursor: pointer;
     font-size: 24px;
@@ -319,6 +329,7 @@
     justify-content: center;
     transition: all 0.3s;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    touch-action: manipulation; /* Prevent double-tap zoom */
 }
 
 .nav-btn:hover:not(:disabled) {
@@ -928,31 +939,252 @@
 
 /* Responsive design */
 @media (max-width: 768px) {
+    .playoff-section {
+        padding: 15px;
+        margin-top: 20px;
+    }
+
+    .playoff-section h2 {
+        font-size: 1.4em;
+    }
+
+    .section-description {
+        font-size: 0.85em;
+        margin-bottom: 15px;
+    }
+
     .playoff-pairs {
+        padding: 10px;
+    }
+
+    .playoff-pairs-grid {
         grid-template-columns: 1fr;
+        gap: 15px;
     }
-    
-    .modal-content {
-        margin: 20px;
-        max-width: calc(100% - 40px);
+
+    .playoff-pair-card {
+        padding: 15px;
     }
-    
+
+    .pair-header {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .pair-team {
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+    .pair-team-name {
+        font-size: 0.85em;
+    }
+
+    .pair-vs {
+        font-size: 0.9em;
+        padding: 0 5px;
+    }
+
+    .pair-meta {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .pair-analyze-btn {
+        width: 100%;
+        padding: 12px;
+        font-size: 14px;
+    }
+
+    .win-probability-summary {
+        padding: 10px;
+        font-size: 0.85em;
+    }
+
+    .playoff-modal .modal-content {
+        max-width: calc(100% - 20px);
+        max-height: calc(100vh - 20px);
+        margin: 10px;
+        padding: 15px;
+    }
+
+    .modal-header h2 {
+        font-size: 1.3em;
+    }
+
     .analysis-header {
         flex-direction: column;
         gap: 15px;
     }
-    
+
+    .analysis-team {
+        width: 100%;
+    }
+
     .analysis-vs {
-        margin: 10px 0;
+        transform: rotate(90deg);
+        margin: 5px 0;
     }
-    
+
+    .win-probability {
+        padding: 15px;
+    }
+
+    .win-probability h3 {
+        font-size: 1.1em;
+    }
+
+    .probability-item {
+        margin-bottom: 12px;
+    }
+
+    .analysis-info {
+        padding: 12px;
+        font-size: 0.9em;
+    }
+
+    .league-table-container {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
     .playoff-league-table {
-        font-size: 0.85em;
+        font-size: 11px;
+        min-width: 800px;
     }
-    
+
     .playoff-league-table th,
     .playoff-league-table td {
+        padding: 6px 4px;
+        font-size: 10px;
+    }
+
+    /* Hide less important columns on mobile */
+    .playoff-league-table th:nth-child(4), /* W */
+    .playoff-league-table td:nth-child(4),
+    .playoff-league-table th:nth-child(5), /* D */
+    .playoff-league-table td:nth-child(5),
+    .playoff-league-table th:nth-child(6), /* L */
+    .playoff-league-table td:nth-child(6),
+    .playoff-league-table th:nth-child(8), /* GA */
+    .playoff-league-table td:nth-child(8),
+    .playoff-league-table th:nth-child(9) { /* GD */
+        display: none;
+    }
+
+    .playoff-league-table td:nth-child(9) {
+        display: none;
+    }
+
+    .direct-matches-section {
+        padding: 15px;
+    }
+
+    .direct-matches-section h3 {
+        font-size: 1.1em;
+    }
+
+    .direct-match-item {
+        padding: 12px;
+    }
+
+    .direct-match-teams {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .direct-match-team {
+        width: 100%;
+        justify-content: center !important;
+    }
+
+    .direct-match-score {
+        width: 100%;
+        padding: 8px 0;
+        border-top: 1px solid #e9ecef;
+        border-bottom: 1px solid #e9ecef;
+    }
+
+    .matches-section {
+        padding: 15px;
+    }
+
+    .matches-section h3 {
+        font-size: 1.1em;
+    }
+
+    .team-matches {
+        padding: 12px;
+        margin-bottom: 15px;
+    }
+
+    .team-matches-header {
+        font-size: 1em;
+    }
+
+    .match-item {
         padding: 8px;
+        font-size: 0.9em;
+    }
+
+    .analysis-navigation {
+        padding: 10px;
+    }
+
+    .nav-btn {
+        width: 40px;
+        height: 40px;
+    }
+
+    .pair-counter {
+        font-size: 0.9em;
+    }
+}
+
+@media (max-width: 480px) {
+    .playoff-section {
+        padding: 12px;
+    }
+
+    .playoff-section h2 {
+        font-size: 1.2em;
+    }
+
+    .playoff-pair-card {
+        padding: 12px;
+    }
+
+    .pair-team-logo {
+        width: 32px;
+        height: 32px;
+    }
+
+    .playoff-modal .modal-content {
+        max-width: calc(100% - 10px);
+        margin: 5px;
+        padding: 12px;
+    }
+
+    .modal-header h2 {
+        font-size: 1.1em;
+    }
+
+    .playoff-league-table {
+        font-size: 10px;
+        min-width: 700px;
+    }
+
+    .playoff-league-table th,
+    .playoff-league-table td {
+        padding: 5px 3px;
+        font-size: 9px;
+    }
+
+    /* Hide even more columns on very small screens */
+    .playoff-league-table th:nth-child(7), /* GF */
+    .playoff-league-table td:nth-child(7) {
+        display: none;
     }
 }
 
