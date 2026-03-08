@@ -10,6 +10,7 @@ from backend.api_client import APIClient
 from backend.api_cache import APICache
 from backend.data_service import DataService
 from backend.solkoff_calculator import SolkoffCalculator
+from backend.elo_calculator import EloCalculator
 
 load_dotenv()
 
@@ -45,6 +46,7 @@ class DataScheduler:
         
         self.data_service = DataService(self.db, self.api_client)
         self.calculator = SolkoffCalculator(self.db)
+        self.elo_calculator = EloCalculator(self.db)
         self.scheduler = BackgroundScheduler()
     
     def update_data(self):
@@ -59,6 +61,10 @@ class DataScheduler:
             # Recalculate Solkoff coefficients
             self.calculator.calculate_all()
             logger.info("Solkoff coefficients calculated successfully")
+
+            # Recalculate Elo ratings
+            self.elo_calculator.calculate_all()
+            logger.info("Elo ratings calculated successfully")
             
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:

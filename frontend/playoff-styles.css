@@ -645,6 +645,208 @@
     font-style: italic;
 }
 
+/* Elo analysis section */
+.elo-analysis-section {
+    margin-top: 30px;
+    padding: 20px;
+    background: #fff;
+    border: 2px solid #667eea;
+    border-radius: 8px;
+}
+
+.elo-analysis-section h3 {
+    margin: 0 0 20px 0;
+    color: #667eea;
+    font-size: 1.3em;
+    font-weight: 600;
+    text-align: center;
+}
+
+.elo-rating-comparison {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    gap: 10px;
+    margin-bottom: 24px;
+}
+
+.elo-team-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    text-align: center;
+}
+
+.elo-team-logo {
+    width: 48px;
+    height: 48px;
+    object-fit: contain;
+}
+
+.elo-team-name {
+    font-size: 0.9em;
+    font-weight: 600;
+    color: #333;
+}
+
+.elo-rating-value {
+    font-size: 2em;
+    font-weight: 700;
+    color: #667eea;
+    line-height: 1;
+}
+
+.elo-matches-played {
+    font-size: 0.8em;
+    color: #6c757d;
+}
+
+.elo-win-pct {
+    font-size: 1em;
+    font-weight: 600;
+    margin-top: 4px;
+}
+
+.team1-color { color: #667eea; }
+.team2-color { color: #e05252; }
+
+.elo-divider {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.elo-delta {
+    font-size: 1.4em;
+    font-weight: 700;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: #f0f2ff;
+    color: #333;
+}
+
+.delta-positive { color: #28a745; }
+.delta-negative { color: #dc3545; }
+
+.elo-divider-label {
+    font-size: 0.75em;
+    color: #6c757d;
+}
+
+.elo-formula-breakdown {
+    background: #f8f9fa;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.elo-formula-breakdown h4 {
+    margin: 0 0 12px 0;
+    color: #667eea;
+    font-size: 0.95em;
+}
+
+.formula-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.formula-step {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.88em;
+    color: #333;
+    padding: 4px 8px;
+    background: #fff;
+    border-radius: 4px;
+    border-left: 3px solid #dee2e6;
+}
+
+.formula-step.result {
+    border-left-color: #667eea;
+    font-size: 0.95em;
+    background: #f0f2ff;
+}
+
+.elo-methodology-note {
+    font-size: 0.82em;
+    color: #6c757d;
+    line-height: 1.5;
+    margin: 0;
+    padding-top: 8px;
+    border-top: 1px solid #dee2e6;
+}
+
+.elo-record {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 4px;
+}
+
+.elo-record-item {
+    font-size: 0.8em;
+    font-weight: 600;
+    padding: 2px 5px;
+    border-radius: 3px;
+}
+
+.elo-record-item.won   { color: #28a745; background: #e8f5e9; }
+.elo-record-item.drawn { color: #888;    background: #f5f5f5; }
+.elo-record-item.lost  { color: #dc3545; background: #fdecea; }
+.elo-record-item.gd    { color: #555;    background: #f0f0f0; }
+.elo-record-sep { color: #bbb; font-size: 0.8em; }
+
+.elo-notable-wins-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.elo-notable-wins-row > * { flex: 1; min-width: 0; }
+
+.notable-wins h5 {
+    margin: 0 0 8px 0;
+    font-size: 0.88em;
+    color: #555;
+    font-weight: 600;
+}
+
+.notable-wins-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82em;
+}
+
+.notable-wins-table th,
+.notable-wins-table td {
+    padding: 4px 6px;
+    text-align: left;
+    border-bottom: 1px solid #eee;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 120px;
+}
+
+.notable-wins-table th {
+    color: #888;
+    font-weight: 600;
+    font-size: 0.85em;
+}
+
+.notable-wins-table .score-cell {
+    font-weight: 700;
+    color: #28a745;
+    white-space: nowrap;
+}
+
 /* Matches section */
 .direct-matches-section {
     margin-top: 30px;

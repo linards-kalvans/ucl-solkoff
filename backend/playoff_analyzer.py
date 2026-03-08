@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Set, Tuple, Optional
 from collections import defaultdict
 from backend.database import Database
 from backend.api_client import APIClient
+from backend.elo_calculator import EloCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class PlayoffAnalyzer:
         """
         self.db = db
         self.api_client = api_client
+        self.elo_calculator = EloCalculator(self.db)
         self.historical_years = int(os.getenv("HISTORICAL_YEARS", "10"))
     
     def _is_valid_date(self, date_str: Optional[str]) -> bool:
@@ -114,8 +116,10 @@ class PlayoffAnalyzer:
             AND m.stage != 'LEAGUE_STAGE'  -- Exclude league/group stage matches
             AND (
                 -- Explicit knockout stage indicators
-                m.stage = 'KNOCKOUT_OUT' OR 
+                m.stage = 'KNOCKOUT_OUT' OR
                 m.stage = 'KNOCKOUT_ROUND' OR
+                m.stage = 'PLAYOFFS' OR
+                m.stage = 'LAST_16' OR
                 (m.round IS NOT NULL AND (
                     UPPER(m.round) LIKE '%PLAY_OFF%' OR
                     UPPER(m.round) LIKE '%ROUND_OF_16%' OR
@@ -197,13 +201,13 @@ class PlayoffAnalyzer:
                     "matchId": match[0],
                     "team1": {
                         "id": home_id,
-                        "name": match[6],
-                        "crest": match[7]
+                        "name": match[8],
+                        "crest": match[9]
                     },
                     "team2": {
                         "id": away_id,
-                        "name": match[8],
-                        "crest": match[9]
+                        "name": match[10],
+                        "crest": match[11]
                     },
                     "matchday": matchday,
                     "stage": stage,
@@ -361,7 +365,7 @@ class PlayoffAnalyzer:
             },
             'ROUND_OF_16': {
                 'round_patterns': ['%ROUND_OF_16%', '%ROUND OF 16%', '%LAST_16%'],
-                'stage_values': [],
+                'stage_values': ['LAST_16'],
                 'matchday_range': (9, 10)
             },
             'QUARTER_FINAL': {
@@ -939,12 +943,14 @@ class PlayoffAnalyzer:
         team1_main_strength = self._get_main_league_strength(team1_id)
         team2_main_strength = self._get_main_league_strength(team2_id)
         
-        # Calculate win probability using combined strength (50% main league + 50% historical)
+        # Calculate win probability using Elo (falls back to combined strength)
         win_probability = self._calculate_win_probability(
-            team1_stats, 
+            team1_stats,
             team2_stats,
             team1_main_strength=team1_main_strength,
-            team2_main_strength=team2_main_strength
+            team2_main_strength=team2_main_strength,
+            team1_id=team1_id,
+            team2_id=team2_id
         )
         
         return {
@@ -1171,7 +1177,8 @@ class PlayoffAnalyzer:
                 team1_stats = self._get_quick_stats(team1_id, team1_matches)
                 team2_stats = self._get_quick_stats(team2_id, team2_matches)
                 
-                return self._calculate_win_probability(team1_stats, team2_stats)
+                return self._calculate_win_probability(team1_stats, team2_stats,
+                                                       team1_id=team1_id, team2_id=team2_id)
         except Exception as e:
             logger.debug(f"Error in quick win probability calculation: {e}")
         
@@ -1242,22 +1249,33 @@ class PlayoffAnalyzer:
             logger.debug(f"Could not get main league strength for team {team_id}: {e}")
             return 0.0
     
-    def _calculate_win_probability(self, team1_stats: Dict, team2_stats: Dict, 
-                                   team1_main_strength: float = None, 
-                                   team2_main_strength: float = None) -> Dict[str, Any]:
-        """Calculate win probability for team1 vs team2 based on combined strength ratings.
-        
-        Uses 50% weight from main league table strength and 50% weight from historical mini-table strength.
-        
+    def _calculate_win_probability(self, team1_stats: Dict, team2_stats: Dict,
+                                   team1_main_strength: float = None,
+                                   team2_main_strength: float = None,
+                                   team1_id: int = None,
+                                   team2_id: int = None) -> Dict[str, Any]:
+        """Calculate win probability for team1 vs team2.
+
+        Uses Elo ratings as the primary method when both teams have sufficient history.
+        Falls back to combined strength (50% main league + 50% historical mini-table).
+
         Args:
             team1_stats: Statistics for team 1 from historical mini-table
             team2_stats: Statistics for team 2 from historical mini-table
             team1_main_strength: Main league table strength rating for team 1
             team2_main_strength: Main league table strength rating for team 2
-            
+            team1_id: Team 1 ID (used for Elo lookup)
+            team2_id: Team 2 ID (used for Elo lookup)
+
         Returns:
             Dictionary with win probabilities
         """
+        # Try Elo-based probability first
+        if team1_id is not None and team2_id is not None:
+            elo_result = self.elo_calculator.get_win_probability(team1_id, team2_id)
+            if elo_result is not None:
+                return elo_result
+
         # Get historical mini-table strength ratings
         team1_historical_strength = team1_stats.get("strengthPerGame", 0.0) if team1_stats else 0.0
         team2_historical_strength = team2_stats.get("strengthPerGame", 0.0) if team2_stats else 0.0

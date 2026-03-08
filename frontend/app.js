@@ -1014,6 +1014,109 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         </div>
     `;
     
+    // Build Elo breakdown section (shown when method is 'elo')
+    let eloSectionHtml = '';
+    if (winProbability.method === 'elo') {
+        const r1 = winProbability.team1EloRating || 1500;
+        const r2 = winProbability.team2EloRating || 1500;
+        const m1 = winProbability.team1MatchesPlayed || 0;
+        const m2 = winProbability.team2MatchesPlayed || 0;
+        const delta = r2 - r1;
+        const exponent = delta / 400;
+        const power = Math.pow(10, exponent);
+        const p1 = 1 / (1 + power);
+        const p2 = 1 - p1;
+        const deltaLabel = delta >= 0 ? `+${delta.toFixed(0)}` : delta.toFixed(0);
+
+        const s1 = winProbability.team1Stats || null;
+        const s2 = winProbability.team2Stats || null;
+
+        function eloStatsRow(s) {
+            if (!s) return '';
+            const gd = s.goalDifference >= 0 ? `+${s.goalDifference}` : `${s.goalDifference}`;
+            return `
+                <div class="elo-record">
+                    <span class="elo-record-item won">${s.won}W</span>
+                    <span class="elo-record-sep">·</span>
+                    <span class="elo-record-item drawn">${s.drawn}D</span>
+                    <span class="elo-record-sep">·</span>
+                    <span class="elo-record-item lost">${s.lost}L</span>
+                    <span class="elo-record-sep">·</span>
+                    <span class="elo-record-item gd">GD ${gd}</span>
+                </div>`;
+        }
+
+        function notableWinsTable(s, name) {
+            if (!s || !s.notableWins || s.notableWins.length === 0) return '';
+            const rows = s.notableWins.map(w => `
+                <tr>
+                    <td>${w.date || '—'}</td>
+                    <td>${w.opponent}</td>
+                    <td class="score-cell">${w.score}</td>
+                </tr>`).join('');
+            return `
+                <div class="notable-wins">
+                    <h5>${name} — Biggest wins</h5>
+                    <table class="notable-wins-table">
+                        <thead><tr><th>Date</th><th>Opponent</th><th>Score</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
+        }
+
+        eloSectionHtml = `
+            <div class="elo-analysis-section">
+                <h3>Elo Rating Breakdown</h3>
+                <div class="elo-rating-comparison">
+                    <div class="elo-team-card">
+                        ${team1.crest ? `<img src="${team1.crest}" alt="${team1.name}" class="elo-team-logo" onerror="this.style.display='none'">` : ''}
+                        <div class="elo-team-name">${team1.name}</div>
+                        <div class="elo-rating-value">${r1.toFixed(0)}</div>
+                        <div class="elo-matches-played">${m1} matches</div>
+                        ${eloStatsRow(s1)}
+                        <div class="elo-win-pct team1-color">${(p1 * 100).toFixed(1)}% win</div>
+                    </div>
+                    <div class="elo-divider">
+                        <div class="elo-delta ${delta > 0 ? 'delta-negative' : 'delta-positive'}">${deltaLabel}</div>
+                        <div class="elo-divider-label">Elo gap</div>
+                    </div>
+                    <div class="elo-team-card">
+                        ${team2.crest ? `<img src="${team2.crest}" alt="${team2.name}" class="elo-team-logo" onerror="this.style.display='none'">` : ''}
+                        <div class="elo-team-name">${team2.name}</div>
+                        <div class="elo-rating-value">${r2.toFixed(0)}</div>
+                        <div class="elo-matches-played">${m2} matches</div>
+                        ${eloStatsRow(s2)}
+                        <div class="elo-win-pct team2-color">${(p2 * 100).toFixed(1)}% win</div>
+                    </div>
+                </div>
+
+                <div class="elo-notable-wins-row">
+                    ${notableWinsTable(s1, team1.name)}
+                    ${notableWinsTable(s2, team2.name)}
+                </div>
+
+                <div class="elo-formula-breakdown">
+                    <h4>Step-by-step calculation (neutral ground, ${team1.name} perspective)</h4>
+                    <div class="formula-steps">
+                        <div class="formula-step">ΔElo = R₂ − R₁ = ${r2.toFixed(0)} − ${r1.toFixed(0)} = ${delta.toFixed(0)}</div>
+                        <div class="formula-step">P(${team1.name}) = 1 / (1 + 10^(ΔElo / 400))</div>
+                        <div class="formula-step">= 1 / (1 + 10^(${delta.toFixed(0)} / 400))</div>
+                        <div class="formula-step">= 1 / (1 + 10^${exponent.toFixed(4)})</div>
+                        <div class="formula-step">= 1 / (1 + ${power.toFixed(4)})</div>
+                        <div class="formula-step result">= <strong>${(p1 * 100).toFixed(1)}%</strong> &nbsp;·&nbsp; P(${team2.name}) = 1 − ${(p1 * 100).toFixed(1)}% = <strong>${(p2 * 100).toFixed(1)}%</strong></div>
+                    </div>
+                </div>
+
+                <p class="elo-methodology-note">
+                    Ratings built by replaying 10 years of UEFA Champions League history chronologically.
+                    Each result updates both teams' ratings: K-factor = 30, goal multiplier = 1 + ln(|goal diff| + 1),
+                    home advantage = +75 Elo during training. Win probability is calculated on a neutral ground.
+                    Default starting rating: 1500. Minimum 5 matches required for confidence.
+                </p>
+            </div>
+        `;
+    }
+
     content.innerHTML = `
         ${navButtons}
         <div class="analysis-header">
@@ -1057,14 +1160,17 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
             ${getProbabilityExplanation(winProbability, team1.name, team2.name)}
         </div>
         
+        ${eloSectionHtml}
+
+        ${winProbability.method !== 'elo' ? `
         <div class="analysis-info">
             <p><strong>Teams in League:</strong> ${fullLeagueTable.length}</p>
             <p><strong>Common Opponents:</strong> ${analysis.commonOpponentsCount}</p>
             <p><strong>Historical Period:</strong> Last ${analysis.historicalYears} years</p>
             ${analysis.commonOpponentsCount === 0 ? '<p class="warning">No common opponents found in the historical data.</p>' : ''}
-        </div>
-        
-        ${fullLeagueTable.length > 0 ? `
+        </div>` : ''}
+
+        ${fullLeagueTable.length > 0 && winProbability.method !== 'elo' ? `
         <div class="league-table-container">
             <h3>Full League Table (All Matches Between Involved Teams)</h3>
             <p class="table-note">Ranked by: Points % → Solkoff → Strength per Game → Goals For</p>
@@ -1285,6 +1391,31 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
                 </div>
             `;
             break;
+        case 'elo': {
+            const r1 = (winProbability.team1EloRating || 1500).toFixed(0);
+            const r2 = (winProbability.team2EloRating || 1500).toFixed(0);
+            const m1 = winProbability.team1MatchesPlayed || 0;
+            const m2 = winProbability.team2MatchesPlayed || 0;
+            const rDiff = Math.abs((winProbability.team1EloRating || 1500) - (winProbability.team2EloRating || 1500)).toFixed(0);
+            explanation = `
+                <div class="probability-explanation">
+                    <h4>How this probability is calculated:</h4>
+                    <p><strong>Method: Goal-Adjusted Elo Rating</strong></p>
+                    <p>Elo ratings are built by replaying 10 years of UEFA Champions League match history.
+                    Each match updates both teams' ratings based on the result and goal margin
+                    (larger wins = bigger rating swing). A home advantage of +75 Elo points is applied during training.</p>
+                    <ul>
+                        <li><strong>${team1Name}:</strong> Elo ${r1} (${m1} matches)</li>
+                        <li><strong>${team2Name}:</strong> Elo ${r2} (${m2} matches)</li>
+                        <li>Rating difference: ${rDiff} points</li>
+                    </ul>
+                    <p>Win probability is calculated on a neutral ground:
+                    <code>P(win) = 1 / (1 + 10^(ΔElo / 400))</code></p>
+                    <p class="probability-note">Draw probability is not modelled — probabilities sum to 100%.</p>
+                </div>
+            `;
+            break;
+        }
         case 'equal_strength':
         case 'no_data':
         case 'insufficient_data':

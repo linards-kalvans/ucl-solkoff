@@ -16,10 +16,12 @@ def scheduler(mock_db):
     """Create scheduler instance."""
     with patch('backend.scheduler.APIClient'), \
          patch('backend.scheduler.DataService'), \
-         patch('backend.scheduler.SolkoffCalculator'):
+         patch('backend.scheduler.SolkoffCalculator'), \
+         patch('backend.scheduler.EloCalculator'):
         sched = DataScheduler(mock_db, "CL")
         sched.data_service = Mock()
         sched.calculator = Mock()
+        sched.elo_calculator = Mock()
         return sched
 
 

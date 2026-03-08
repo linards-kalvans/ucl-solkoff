@@ -127,6 +127,16 @@ class Database:
             # Table might not exist yet, which is fine
             logger.debug(f"Could not migrate solkoff_coefficients schema (this is OK if table doesn't exist): {e}")
         
+        # Elo ratings table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS elo_ratings (
+                team_id INTEGER PRIMARY KEY,
+                rating REAL NOT NULL,
+                matches_played INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # API cache table
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS api_cache (

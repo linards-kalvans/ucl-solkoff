@@ -1,138 +1,162 @@
-# Railway Deployment Guide
+# Deployment
 
-This guide will help you deploy the UCL Solkoff app to Railway's free tier.
+## Overview
 
-## Prerequisites
+The app runs as a Docker container on a Hetzner CX23 server alongside OpenClaw.
+Caddy handles TLS (auto Let's Encrypt) and reverse proxying.
 
-1. A [Railway](https://railway.app) account (free tier available)
-2. A GitHub account (for connecting your repository)
-3. A football-data.org API key (get one at https://www.football-data.org/client/register)
+| URL | Service |
+|-----|---------|
+| https://ucl.mplytics.eu | UCL Solkoff (this app) |
+| https://claw.mplytics.eu | OpenClaw (same server) |
 
-## Deployment Steps
+**Server:** `46.224.234.243` (Hetzner nbg1) — SSH as `deploy@46.224.234.243`
 
-### 1. Prepare Your Repository
+---
 
-Make sure your code is pushed to a GitHub repository:
+## First deploy
+
+### Prerequisites
+
+- SSH access configured (`~/.ssh/config` or key loaded in agent)
+- DNS record for `ucl.mplytics.eu` pointing to the server IP
+
+### 1. Create the app directory on the server (once only)
 
 ```bash
-git add .
-git commit -m "Prepare for Railway deployment"
-git push origin main
+ssh deploy@46.224.234.243 "sudo mkdir -p /opt/ucl-solkoff && sudo chown deploy:deploy /opt/ucl-solkoff"
 ```
 
-### 2. Create a New Railway Project
+### 2. Run the deploy script
 
-1. Go to [Railway Dashboard](https://railway.app/dashboard)
-2. Click "New Project"
-3. Select "Deploy from GitHub repo"
-4. Choose your repository
-5. Railway will automatically detect the project
+```bash
+cd /path/to/ucl-solkoff
+bash openclaw/deploy.sh
+```
 
-### 3. Configure Environment Variables
+The script does everything in one shot:
 
-In Railway dashboard, go to your service → Variables tab and add:
+1. Rsyncs source to `/opt/ucl-solkoff/` on the server
+2. Writes `/opt/ucl-solkoff/.env` with production config
+3. Appends the `ucl.mplytics.eu` block to `/opt/openclaw/Caddyfile` (skipped if already present)
+4. Injects the `ucl-solkoff` service + `ucl_data` volume into `/opt/openclaw/docker-compose.yml` (skipped if already present)
+5. Builds the Docker image on the server
+6. Starts the container (`docker compose up -d ucl-solkoff`)
+7. Reloads Caddy to pick up the new vhost
+8. Smoke-tests `https://ucl.mplytics.eu`
 
-**Required:**
-- `EXTERNAL_API_KEY` - Your football-data.org API key
-- `PORT` - Railway sets this automatically, but you can verify it's set
+Expected output ends with `HTTP 200`.
 
-**Optional (with defaults):**
-- `EXTERNAL_API_BASE_URL` - Default: `https://api.football-data.org/v4`
-- `COMPETITION_ID` - Default: `CL` (Champions League)
-- `DB_PATH` - Default: `./data/ucl.db` (Railway will use ephemeral storage)
-- `UPDATE_INTERVAL` - Default: `3600` (1 hour in seconds)
-- `API_CACHE_TTL` - Default: `3600` (1 hour in seconds)
-- `API_MIN_REQUEST_INTERVAL` - Default: `0.1` (100ms)
+---
 
-### 4. Add Persistent Volume (Optional but Recommended)
+## Redeploying after code changes
 
-For the free tier, Railway provides ephemeral storage. To persist your database:
+```bash
+cd /path/to/ucl-solkoff
+bash openclaw/deploy.sh
+```
 
-1. Go to your service in Railway
-2. Click "Add Volume"
-3. Mount it to `/data` or your preferred path
-4. Update `DB_PATH` environment variable to use the volume path
+The rsync + build steps are idempotent. Caddy and compose patching are skipped on subsequent runs.
+The container is replaced in-place with the rebuilt image.
 
-**Note:** Free tier has limited storage. Consider using Railway's persistent volume feature if available.
+---
 
-### 5. Deploy
+## Server layout
 
-Railway will automatically:
-1. Detect the project (uses nixpacks)
-2. Install dependencies using `uv sync`
-3. Start the application with the command in `Procfile`
+```
+/opt/openclaw/              ← OpenClaw stack (Caddy lives here)
+├── docker-compose.yml      ← ucl-solkoff service is added here
+├── Caddyfile               ← ucl.mplytics.eu block is added here
+└── .env
 
-### 6. Access Your App
+/opt/ucl-solkoff/           ← app source (rsynced from local)
+├── Dockerfile
+├── backend/
+├── frontend/
+├── pyproject.toml
+├── uv.lock
+└── .env                    ← production secrets (chmod 600)
+```
 
-Once deployed:
-1. Railway will provide a public URL (e.g., `https://your-app.railway.app`)
-2. The frontend will be served at the root URL
-3. API endpoints are available at `/api/*`
+Data (DuckDB + GitHub history cache) persists in the `ucl_data` Docker named volume,
+mounted at `/app/data` inside the container. It survives container restarts and rebuilds.
 
-## Configuration Files
+---
 
-The deployment uses these files:
-- `Procfile` - Defines the start command
-- `nixpacks.toml` - Build configuration
-- `railway.json` - Railway-specific configuration
-- `pyproject.toml` - Python dependencies (used by uv)
+## Useful commands
+
+```bash
+# Tail live logs
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose logs -f ucl-solkoff"
+
+# Container status and health
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose ps ucl-solkoff"
+
+# Open a shell inside the container
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose exec ucl-solkoff bash"
+
+# Trigger a manual data refresh
+curl -X POST https://ucl.mplytics.eu/api/refresh
+
+# Restart without rebuilding
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose restart ucl-solkoff"
+```
+
+---
+
+## Environment variables
+
+Managed in `/opt/ucl-solkoff/.env` on the server (written by `openclaw/deploy.sh`).
+
+| Variable | Description |
+|----------|-------------|
+| `EXTERNAL_API_KEY` | football-data.org API key |
+| `EXTERNAL_API_BASE_URL` | API base URL |
+| `COMPETITION_ID` | `CL` (Champions League) |
+| `DB_PATH` | `/app/data/ucl.db` (inside container) |
+| `UPDATE_INTERVAL` | Scheduler interval in seconds (default 7200) |
+| `API_CACHE_TTL` | API cache TTL in seconds (default 7200) |
+| `API_MIN_REQUEST_INTERVAL` | Minimum delay between API requests in seconds |
+
+To change a value: edit the `cat <<'ENV'` heredoc in `openclaw/deploy.sh`, then redeploy.
+To change it immediately without redeploying: edit the file on the server and `docker compose restart ucl-solkoff`.
+
+---
+
+## Modifying Caddy or compose config after initial deploy
+
+The deploy script only patches these files once. For subsequent changes:
+
+```bash
+# Edit Caddyfile directly on server, then reload
+ssh deploy@46.224.234.243 "nano /opt/openclaw/Caddyfile"
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile"
+
+# Edit compose file directly on server, then apply
+ssh deploy@46.224.234.243 "nano /opt/openclaw/docker-compose.yml"
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose up -d ucl-solkoff"
+```
+
+---
 
 ## Troubleshooting
 
-### Database Issues
-
-If you see database errors:
-- Check that the `data/` directory is writable
-- On Railway, ensure volumes are properly mounted
-- Check `DB_PATH` environment variable
-
-### API Key Issues
-
-If you see 403 errors:
-- Verify `EXTERNAL_API_KEY` is set correctly
-- Check Railway logs for API errors
-- Ensure your API key is valid at football-data.org
-
-### Build Failures
-
-If the build fails:
-- Check Railway logs for specific errors
-- Ensure `uv` is available (nixpacks should handle this)
-- Verify all dependencies in `pyproject.toml` are correct
-
-### Port Issues
-
-Railway automatically sets the `PORT` environment variable. The app is configured to use it:
-```python
-port = int(os.getenv("PORT", "8000"))
+**Container not starting**
+```bash
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose logs ucl-solkoff --tail=50"
 ```
 
-## Free Tier Limitations
+**Caddy not routing `ucl.mplytics.eu`**
+```bash
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose logs caddy --tail=20"
+ssh deploy@46.224.234.243 "cd /opt/openclaw && docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile"
+```
 
-Railway's free tier includes:
-- 500 hours/month of usage
-- Limited storage (ephemeral by default)
-- Public deployments
+**Empty standings / data not loading**
+The app fetches live data on startup and then every `UPDATE_INTERVAL` seconds.
+Check logs for `HTTP 403` (invalid API key) or `HTTP 429` (rate limit exceeded).
 
-**Important:** The database will be reset if you don't use a persistent volume. Consider upgrading or using Railway's volume feature for data persistence.
-
-## Monitoring
-
-- Check Railway dashboard for logs
-- Use `/api/health` endpoint for health checks
-- Monitor API rate limits (football-data.org has rate limits)
-
-## Updating the Deployment
-
-To update your deployment:
-1. Push changes to GitHub
-2. Railway will automatically redeploy
-3. Or manually trigger a redeploy from Railway dashboard
-
-## Custom Domain (Optional)
-
-Railway allows custom domains:
-1. Go to your service → Settings → Domains
-2. Add your custom domain
-3. Configure DNS as instructed
-
+**TLS certificate not issued**
+Caddy obtains Let's Encrypt certificates automatically on first request.
+Requires ports 80 and 443 open and DNS resolving to the server.
+Certificate issuance takes up to ~30 seconds on first hit.
