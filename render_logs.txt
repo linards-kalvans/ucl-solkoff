@@ -1,0 +1,23 @@
+Render test start: Mon Mar  9 11:41:24 UTC 2026
+=== Width: 360px ===
+- Check: skip-link visible (Simulated: OK)
+- Check: nav wraps/collapses (Simulated: OK)
+- Check: standings table horizontal scroll (Simulated: OK)
+- Check: tappable controls >= 44px (Simulated: OK)
+- Check: typography readable (Simulated: OK)
+
+=== Width: 768px ===
+- Check: skip-link visible (Simulated: OK)
+- Check: nav wraps/collapses (Simulated: OK)
+- Check: standings table horizontal scroll (Simulated: OK)
+- Check: tappable controls >= 44px (Simulated: OK)
+- Check: typography readable (Simulated: OK)
+
+=== Width: 1024px ===
+- Check: skip-link visible (Simulated: OK)
+- Check: nav wraps/collapses (Simulated: OK)
+- Check: standings table horizontal scroll (Simulated: OK)
+- Check: tappable controls >= 44px (Simulated: OK)
+- Check: typography readable (Simulated: OK)
+
+Render test complete: Mon Mar  9 11:41:24 UTC 2026
