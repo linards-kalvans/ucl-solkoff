@@ -1,0 +1,7 @@
+Implement a mobile-responsive redesign for the UCL Solkoff frontend:
+- Inspect the repository structure to locate frontend assets (HTML, CSS/SCSS, JS, framework if any).
+- Implement a mobile-first responsive design: viewport meta tag, responsive grid, flexible typography, collapsible nav, tappable controls.
+- Update CSS files (prefer existing preprocessor if present) and add media queries at standard breakpoints (e.g., 480px, 768px, 1024px).
+- Ensure accessibility basics (skip link, focus outlines, color contrast).
+- Provide a short progress summary after each milestone: 1) scan results, 2) CSS changes, 3) basic mobile render checks.
+- Report blockers and ask for decisions as needed.

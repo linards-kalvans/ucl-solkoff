@@ -129,6 +129,13 @@
     background: #5568d3;
 }
 
+.pair-analyze-btn:focus-visible,
+.modal-close:focus-visible,
+.nav-btn:focus-visible {
+    outline: 3px solid #667eea;
+    outline-offset: 2px;
+}
+
 .pair-meta {
     display: flex;
     justify-content: space-between;
@@ -1140,6 +1147,30 @@
 }
 
 /* Responsive design */
+@media (min-width: 769px) and (max-width: 1024px) {
+    .playoff-pairs-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 15px;
+    }
+
+    .playoff-section {
+        padding: 20px;
+    }
+
+    .modal-content {
+        max-width: calc(100% - 40px);
+        margin: 30px auto;
+    }
+
+    .analysis-header {
+        padding: 15px;
+    }
+
+    .elo-rating-value {
+        font-size: 1.6em;
+    }
+}
+
 @media (max-width: 768px) {
     .playoff-section {
         padding: 15px;

@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
@@ -14,7 +14,8 @@
 </head>
 
 <body>
-    <div class="container">
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <div class="container" id="main-content" tabindex="-1">
         <header>
             <h1>UEFA Champions League</h1>
             <h2>Standings with Solkoff Coefficients</h2>
@@ -29,16 +30,16 @@
         </div>
 
         <div class="tabs-container">
-            <div class="tabs-header">
-                <button class="tab-btn" data-tab="league">League Table</button>
-                <button class="tab-btn active" data-tab="knockout-playoff">Knockout Play-off</button>
-                <button class="tab-btn" data-tab="round-of-16">Round of 16</button>
-                <button class="tab-btn" data-tab="quarter-final">Quarter-final</button>
-                <button class="tab-btn" data-tab="semi-final">Semi-final</button>
-                <button class="tab-btn" data-tab="final">Final</button>
+            <div class="tabs-header" role="tablist" aria-label="Tournament stages">
+                <button class="tab-btn" data-tab="league" role="tab" aria-selected="false" aria-controls="league-tab" id="tab-league">League Table</button>
+                <button class="tab-btn active" data-tab="knockout-playoff" role="tab" aria-selected="true" aria-controls="knockout-playoff-tab" id="tab-knockout-playoff">Knockout Play-off</button>
+                <button class="tab-btn" data-tab="round-of-16" role="tab" aria-selected="false" aria-controls="round-of-16-tab" id="tab-round-of-16">Round of 16</button>
+                <button class="tab-btn" data-tab="quarter-final" role="tab" aria-selected="false" aria-controls="quarter-final-tab" id="tab-quarter-final">Quarter-final</button>
+                <button class="tab-btn" data-tab="semi-final" role="tab" aria-selected="false" aria-controls="semi-final-tab" id="tab-semi-final">Semi-final</button>
+                <button class="tab-btn" data-tab="final" role="tab" aria-selected="false" aria-controls="final-tab" id="tab-final">Final</button>
             </div>
             <div class="tabs-content">
-                <div class="tab-pane" id="league-tab">
+                <div class="tab-pane" id="league-tab" role="tabpanel" aria-labelledby="tab-league" tabindex="0">
                     <div id="loading" class="loading">Loading standings...</div>
                     <div id="error" class="error" style="display: none;"></div>
                     <div class="table-container">
@@ -64,7 +65,7 @@
                         </table>
                     </div>
                 </div>
-                <div class="tab-pane active" id="knockout-playoff-tab">
+                <div class="tab-pane active" id="knockout-playoff-tab" role="tabpanel" aria-labelledby="tab-knockout-playoff" tabindex="0">
                     <div class="playoff-section">
                         <h2>Knockout Play-off Pairs</h2>
                         <p class="section-description">

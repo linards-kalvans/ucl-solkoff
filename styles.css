@@ -1,0 +1,51 @@
+/* Mobile-first baseline adjustments for responsive UI */
+
+/* Ensure content container uses full width and scales nicely */
+.container, .container-fluid {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+/* Improve tap targets and base focus visibility */
+a, button, input, select, textarea {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+:focus {
+  outline: 2px solid #2a7ae2;
+  outline-offset: 2px;
+}
+
+/* Standings/cards: enable horizontal scroll on narrow viewports later via media queries */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+
+/* 1) Mobile-first tweaks (default) */
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  line-height: 1.5;
+  color: #222;
+  background-color: #fff;
+}
+
+/* 2) Grid and content layout: single-column baseline for mobile */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+/* 3) Headings scale a bit smaller on phones */
+h1, h2, h3 {
+  margin: 0.5rem 0;
+  font-weight: 600;
+}
+
+/* 4) Ensure images scale */
+img { max-width: 100%; height: auto; display: block; }

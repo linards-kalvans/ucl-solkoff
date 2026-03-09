@@ -4,6 +4,28 @@
     box-sizing: border-box;
 }
 
+/* Skip navigation link - visually hidden until focused */
+.skip-link {
+    position: absolute;
+    top: -44px;
+    left: 0;
+    background: #667eea;
+    color: white;
+    padding: 8px 16px;
+    z-index: 9999;
+    border-radius: 0 0 6px 0;
+    font-weight: 600;
+    font-size: 14px;
+    text-decoration: none;
+    transition: top 0.2s;
+}
+
+.skip-link:focus {
+    top: 0;
+    outline: 3px solid white;
+    outline-offset: 2px;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -79,6 +101,20 @@ header h2 {
 
 .btn:active {
     transform: scale(0.98);
+}
+
+/* Focus-visible outlines for keyboard navigation */
+.btn:focus-visible,
+.tab-btn:focus-visible,
+.detail-close:focus-visible,
+.footer-link:focus-visible {
+    outline: 3px solid #667eea;
+    outline-offset: 2px;
+}
+
+.standings-table th:focus-visible {
+    outline: 3px solid #667eea;
+    outline-offset: -2px;
 }
 
 .last-updated {
@@ -592,6 +628,8 @@ header h2 {
     position: relative;
     margin: 2px;
     letter-spacing: 0.3px;
+    min-height: 44px;
+    touch-action: manipulation;
 }
 
 .tab-btn:hover {
@@ -840,40 +878,22 @@ header h2 {
     }
 }
 
-@media (max-width: 480px) {
-    .table-container {
-        padding: 5px;
-        max-height: none; /* Remove max-height on very small screens */
+@media (min-width: 769px) and (max-width: 1024px) {
+    header h1 {
+        font-size: 2em;
     }
 
-    .standings-table {
-        font-size: 10px;
-        min-width: 700px;
+    .controls {
+        padding: 15px 20px;
     }
 
-    .standings-table th,
-    .standings-table td {
-        padding: 6px 3px;
-    }
-
-    /* Hide even more columns on very small screens */
-    .standings-table th:nth-child(7), /* GF */
-    .standings-table td:nth-child(7),
-    .standings-table th:nth-child(9) { /* GD */
-        display: none;
-    }
-
-    .standings-table td:nth-child(9) {
-        display: none;
+    .detail-content {
+        gap: 20px;
     }
 
     .tab-btn {
-        padding: 10px 12px;
-        font-size: 12px;
-    }
-
-    .tabs-content {
-        padding: 10px 5px;
+        padding: 14px 20px;
+        font-size: 14px;
     }
 }
 
@@ -900,6 +920,7 @@ header h2 {
 
     .table-container {
         padding: 5px;
+        max-height: none;
     }
 
     .standings-table {
@@ -915,10 +936,7 @@ header h2 {
     /* Hide even more columns on very small screens */
     .standings-table th:nth-child(7), /* GF */
     .standings-table td:nth-child(7),
-    .standings-table th:nth-child(9) { /* GD */
-        display: none;
-    }
-
+    .standings-table th:nth-child(9), /* GD */
     .standings-table td:nth-child(9) {
         display: none;
     }

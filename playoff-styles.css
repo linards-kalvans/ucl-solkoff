@@ -1,0 +1,24 @@
+/* Mobile-first adjustments for playoff styling */
+
+.table-responsive { overflow-x: auto; }
+
+/* Ensure compact but tappable controls */
+.btn, .control {
+  padding: 12px 16px;
+  font-size: 16px;
+  border-radius: 6px;
+}
+
+/* 2nd breakpoint: tablet */
+@media (min-width: 768px) {
+  .main-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* 3rd breakpoint: small desktop */
+@media (min-width: 1024px) {
+  .main-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
