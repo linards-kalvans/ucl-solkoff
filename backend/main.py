@@ -57,6 +57,28 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Initial data update failed: {e}")
             logger.warning("The application will continue, but data may not be available until API key is configured.")
+
+        # Sync historical data in the background on first boot (when DB is empty).
+        # Historical seasons don't change, so this only needs to run once per fresh volume.
+        def _maybe_sync_historical():
+            try:
+                row = db.fetchone(
+                    "SELECT COUNT(*) FROM matches WHERE competition_id IN ('CL', 'UCL', 'EL') AND date < '2024-01-01'"
+                )
+                historical_count = row[0] if row else 0
+                if historical_count < 100:
+                    years_back = int(os.getenv("HISTORICAL_YEARS", "10"))
+                    logger.info(f"Historical matches missing ({historical_count} found) — starting background sync for {years_back} years")
+                    scheduler.data_service.sync_historical_matches(years_back=years_back)
+                    scheduler.elo_calculator.calculate_all()
+                    logger.info("Background historical sync complete — Elo ratings updated")
+                else:
+                    logger.info(f"Historical data already present ({historical_count} matches), skipping sync")
+            except Exception as e:
+                logger.error(f"Background historical sync failed: {e}", exc_info=True)
+
+        import threading
+        threading.Thread(target=_maybe_sync_historical, daemon=True).start()
     except ValueError as e:
         logger.error(f"Failed to initialize scheduler: {e}")
         logger.error("Please set EXTERNAL_API_KEY in your .env file to enable data updates.")
