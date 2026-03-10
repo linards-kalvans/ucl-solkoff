@@ -123,20 +123,37 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     
-    // Make table headers sortable
+    // Make table headers sortable (click + keyboard)
     const headers = document.querySelectorAll('.standings-table th');
     headers.forEach((header, index) => {
         if (header.textContent.trim() !== 'Team') {
             header.addEventListener('click', (e) => {
-                // Check if Shift key is held to remove from sort
                 if (e.shiftKey) {
                     removeSortOrder(index);
                 } else {
                     addSortOrder(index);
                 }
             });
+            // Keyboard: Enter sorts, Shift+Enter removes sort
+            header.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        removeSortOrder(index);
+                    } else {
+                        addSortOrder(index);
+                    }
+                }
+            });
         }
     });
+
+    // Intro banner
+    showIntroIfFirstVisit();
+    const dismissBtn = document.getElementById('introDismissBtn');
+    if (dismissBtn) {
+        dismissBtn.addEventListener('click', dismissIntro);
+    }
 });
 
 function initializeTabs() {
@@ -145,6 +162,27 @@ function initializeTabs() {
         btn.addEventListener('click', () => {
             const tabId = btn.dataset.tab;
             activateTab(tabId);
+        });
+
+        // WAI-ARIA roving tabindex: arrow key navigation within tablist
+        btn.addEventListener('keydown', (e) => {
+            const tabs = Array.from(document.querySelectorAll('.tab-btn'));
+            const idx = tabs.indexOf(e.currentTarget);
+            let target = null;
+            if (e.key === 'ArrowRight') {
+                target = tabs[(idx + 1) % tabs.length];
+            } else if (e.key === 'ArrowLeft') {
+                target = tabs[(idx - 1 + tabs.length) % tabs.length];
+            } else if (e.key === 'Home') {
+                target = tabs[0];
+            } else if (e.key === 'End') {
+                target = tabs[tabs.length - 1];
+            }
+            if (target) {
+                e.preventDefault();
+                target.focus();
+                target.click();
+            }
         });
     });
 }
@@ -410,10 +448,10 @@ async function loadStandings() {
     if (errorEl) {
         errorEl.style.display = 'none';
     }
-    
-    // Clear table body
-    tableBody.innerHTML = '';
-    
+
+    // Show skeleton rows while loading
+    tableBody.innerHTML = renderSkeletonRows(10);
+
     try {
         console.log('Fetching standings from:', `${API_BASE_URL}/api/standings`);
         const response = await fetch(`${API_BASE_URL}/api/standings`);
@@ -455,7 +493,17 @@ async function loadStandings() {
 function renderTable(data) {
     const tableBody = document.getElementById('standingsBody');
     tableBody.innerHTML = '';
-    
+
+    // Compute min/max for color scale
+    const strengthValues = data.map(t => t.strengthScore || 0);
+    const ptsValues = data.map(t => t.points || 0);
+    const maxStrength = Math.max(...strengthValues);
+    const minStrength = Math.min(...strengthValues);
+    const maxPts = Math.max(...ptsValues);
+    const minPts = Math.min(...ptsValues);
+    const strengthRange = (maxStrength - minStrength) || 1;
+    const ptsRange = (maxPts - minPts) || 1;
+
     data.forEach((team, index) => {
         // Main team row
         const row = document.createElement('tr');
@@ -479,10 +527,16 @@ function renderTable(data) {
             <td>${team.gf}</td>
             <td>${team.ga}</td>
             <td>${team.gd > 0 ? '+' : ''}${team.gd}</td>
-            <td><strong>${team.points}</strong></td>
+            <td class="pts-cell">${team.points}</td>
             <td class="clickable">${(team.solkoffCoefficient || 0).toFixed(2)}</td>
             <td class="clickable strength-score">${(team.strengthScore || 0).toFixed(2)}</td>
         `;
+
+        // Apply color-scale CSS custom properties
+        const ptsPct = ((team.points || 0) - minPts) / ptsRange;
+        const strengthPct = ((team.strengthScore || 0) - minStrength) / strengthRange;
+        row.querySelector('.pts-cell').style.setProperty('--pts-pct', ptsPct);
+        row.querySelector('.strength-score').style.setProperty('--strength-pct', strengthPct);
         
         // Add click handler to team name and Solkoff cell
         const teamCell = row.querySelector('.team-cell');
@@ -1634,3 +1688,26 @@ function updateLastUpdated() {
     lastUpdatedEl.textContent = `Last updated: ${now.toLocaleTimeString()}`;
 }
 
+// ── Intro banner ──────────────────────────────────────────────────────────────
+function showIntroIfFirstVisit() {
+    if (!localStorage.getItem('solkoff-intro-seen')) {
+        const banner = document.getElementById('intro-banner');
+        if (banner) banner.removeAttribute('hidden');
+    }
+}
+
+function dismissIntro() {
+    localStorage.setItem('solkoff-intro-seen', '1');
+    const banner = document.getElementById('intro-banner');
+    if (banner) banner.setAttribute('hidden', '');
+}
+
+// ── Skeleton loading rows ─────────────────────────────────────────────────────
+function renderSkeletonRows(count) {
+    const widths = ['20px', '140px', '24px', '24px', '24px', '24px', '28px', '28px', '32px', '32px', '48px', '48px'];
+    return Array.from({length: count}, () =>
+        `<tr class="skeleton-row" aria-hidden="true">` +
+        widths.map(w => `<td><span class="skeleton-cell" style="width:${w}"></span></td>`).join('') +
+        `</tr>`
+    ).join('');
+}

@@ -1016,19 +1016,145 @@ header h2 {
     .footer-content {
         gap: 12px;
     }
-    
+
     .footer-links {
         gap: 12px;
     }
-    
+
     .footer-link {
         padding: 6px 12px;
         font-size: 0.85em;
     }
-    
+
     .footer-link svg {
         width: 18px;
         height: 18px;
     }
 }
 
+/* =====================================================
+   INTRO BANNER
+   ===================================================== */
+.intro-banner {
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    color: white;
+    padding: 0 20px;
+    max-width: 1200px;
+    margin: 0 auto 12px;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    animation: bannerSlideDown 0.35s ease-out;
+}
+
+@keyframes bannerSlideDown {
+    from { opacity: 0; transform: translateY(-12px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.intro-banner[hidden] { display: none; }
+
+.intro-banner-inner {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 16px 0;
+    flex-wrap: wrap;
+}
+
+.intro-banner-text {
+    flex: 1;
+    min-width: 200px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.intro-banner-text strong {
+    font-size: 15px;
+    display: block;
+    margin-bottom: 4px;
+    color: #fff;
+}
+
+.intro-banner-text em {
+    font-style: normal;
+    font-weight: 600;
+    color: #a5b4fc;
+}
+
+.intro-dismiss-btn {
+    background: rgba(255, 255, 255, 0.18);
+    color: white;
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    padding: 8px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background 0.2s, border-color 0.2s;
+    min-height: 44px;
+    flex-shrink: 0;
+}
+
+.intro-dismiss-btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+    border-color: white;
+}
+
+.intro-dismiss-btn:focus-visible {
+    outline: 3px solid #a5b4fc;
+    outline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+    .intro-banner-inner { gap: 12px; }
+    .intro-banner-text { font-size: 13px; }
+}
+
+/* =====================================================
+   SKELETON LOADING STATE
+   ===================================================== */
+.skeleton-cell {
+    display: inline-block;
+    background: linear-gradient(90deg, #e8eaed 25%, #d4d8de 50%, #e8eaed 75%);
+    background-size: 300% 100%;
+    animation: shimmer 1.4s infinite linear;
+    border-radius: 4px;
+    height: 14px;
+    vertical-align: middle;
+}
+
+@keyframes shimmer {
+    from { background-position: 100% 0; }
+    to   { background-position: -100% 0; }
+}
+
+.skeleton-row td { padding: 11px 8px; }
+
+/* =====================================================
+   COLOR SCALE: Pts and Strength columns
+   ===================================================== */
+
+/* Pts column: teal-green heat */
+.standings-table td.pts-cell {
+    font-weight: 700;
+    background-color: rgba(40, 167, 69, calc(0.06 + var(--pts-pct, 0) * 0.32));
+    color: #155724;
+}
+
+/* Strength column: indigo heat (overrides base rule) */
+.standings-table td.strength-score {
+    font-weight: 700;
+    color: #3730a3;
+    font-size: 1.05em;
+    background-color: rgba(102, 126, 234, calc(0.06 + var(--strength-pct, 0) * 0.32));
+}
+
+/* High-contrast focus on th */
+.standings-table th:focus-visible {
+    outline: 3px solid #3730a3;
+    outline-offset: -2px;
+    background: #e0e7ff;
+    color: #1e1b4b;
+}

@@ -15,6 +15,19 @@
 
 <body>
     <a href="#main-content" class="skip-link">Skip to main content</a>
+
+    <div id="intro-banner" class="intro-banner" role="region" aria-label="About Solkoff standings" hidden>
+        <div class="intro-banner-inner">
+            <div class="intro-banner-text">
+                <strong>What are Solkoff Standings?</strong>
+                The <em>Solkoff coefficient</em> measures strength of schedule — it's the average points-per-game of every opponent a team has faced.
+                <strong>Strength Score</strong> = your Points% × Solkoff, so it rewards both good results <em>and</em> tough opponents.
+                Click any team name or Solkoff value to expand the full breakdown.
+            </div>
+            <button class="intro-dismiss-btn" id="introDismissBtn" aria-label="Dismiss introduction">Got it</button>
+        </div>
+    </div>
+
     <div class="container" id="main-content" tabindex="-1">
         <header>
             <h1>UEFA Champions League</h1>
@@ -46,18 +59,18 @@
                         <table id="standingsTable" class="standings-table">
                             <thead>
                                 <tr>
-                                    <th>Pos</th>
-                                    <th>Team</th>
-                                    <th>P</th>
-                                    <th>W</th>
-                                    <th>D</th>
-                                    <th>L</th>
-                                    <th>GF</th>
-                                    <th>GA</th>
-                                    <th>GD</th>
-                                    <th>Pts</th>
-                                    <th>Solkoff</th>
-                                    <th>Strength</th>
+                                    <th scope="col" aria-label="Position" tabindex="0">Pos</th>
+                                    <th scope="col" aria-label="Team name">Team</th>
+                                    <th scope="col" aria-label="Games played" tabindex="0">P</th>
+                                    <th scope="col" aria-label="Wins" tabindex="0">W</th>
+                                    <th scope="col" aria-label="Draws" tabindex="0">D</th>
+                                    <th scope="col" aria-label="Losses" tabindex="0">L</th>
+                                    <th scope="col" aria-label="Goals for" tabindex="0">GF</th>
+                                    <th scope="col" aria-label="Goals against" tabindex="0">GA</th>
+                                    <th scope="col" aria-label="Goal difference" tabindex="0">GD</th>
+                                    <th scope="col" aria-label="Points" tabindex="0">Pts</th>
+                                    <th scope="col" aria-label="Solkoff coefficient: average opponent points per game" tabindex="0">Solkoff</th>
+                                    <th scope="col" aria-label="Strength score: points percentage multiplied by Solkoff" tabindex="0">Strength</th>
                                 </tr>
                             </thead>
                             <tbody id="standingsBody">
