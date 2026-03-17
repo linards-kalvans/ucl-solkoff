@@ -86,11 +86,11 @@ class DataScheduler:
         except Exception as e:
             logger.error(f"Error updating data: {e}", exc_info=True)
     
-    def start(self, interval_seconds: int = 3600):
+    def start(self, interval_seconds: int = 86400):
         """Start the scheduler.
         
         Args:
-            interval_seconds: Update interval in seconds (default: 3600 = 1 hour)
+            interval_seconds: Update interval in seconds (default: 86400 = 1 day)
         """
         trigger = IntervalTrigger(seconds=interval_seconds)
         self.scheduler.add_job(
