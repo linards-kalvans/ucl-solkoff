@@ -48,6 +48,10 @@
             </nav>
 
             <div class="controls">
+                <label class="season-control" for="seasonSelect">
+                    <span class="season-label">Season</span>
+                    <select id="seasonSelect" aria-label="Select season" disabled></select>
+                </label>
                 <span id="lastUpdated" class="last-updated"></span>
                 <button id="refreshBtn" class="btn" aria-describedby="refreshHelp">Reload data</button>
                 <small id="refreshHelp" class="sort-help">Reload stored data — re-reads saved standings and results; it does not request a server-side refresh. Automatic updates run on a schedule.</small>

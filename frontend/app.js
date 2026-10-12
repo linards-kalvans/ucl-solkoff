@@ -2,6 +2,14 @@
 // Auto-detect API base URL based on environment
 const API_BASE_URL = window.location.origin;
 
+// Season selection: the current season is resolved from /api/seasons and every
+// season-dependent GET carries the selected start year. `seasonGen` drops
+// responses that belong to a season the user already switched away from.
+let seasons = [];
+let selectedSeason = null; // season start year; null until resolved (backend defaults to current)
+let currentSeason = null;  // resolved current season, for historical-date display
+let seasonGen = 0;
+
 let standingsData = [];
 // Multi-column sort: array of {column, direction} objects
 // Default: Strength only
@@ -46,8 +54,9 @@ const STAGE_DISPLAY_NAMES = {
     'final': 'Final'
 };
 
-// Helper function to format match dates
-function formatMatchDate(dateString) {
+// Helper function to format match dates. Archived seasons keep their real
+// dates: the 6-month freshness window only guards the live feed.
+function formatMatchDate(dateString, allowHistorical = false) {
     if (!dateString) return '';
     
     try {
@@ -69,11 +78,14 @@ function formatMatchDate(dateString) {
         }
         
         // Also check if date is in the past (more than 6 months ago for scheduled matches)
-        // This catches invalid placeholder dates like July 2025 when we're in 2026
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(now.getMonth() - 6);
-        if (date < sixMonthsAgo) {
-            return ''; // Don't show old/invalid dates
+        // This catches invalid placeholder dates like July 2025 when we're in 2026.
+        // Archived seasons legitimately have older dates, so skip this window then.
+        if (!allowHistorical) {
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(now.getMonth() - 6);
+            if (date < sixMonthsAgo) {
+                return ''; // Don't show old/invalid dates
+            }
         }
         
         // Format as readable date
@@ -88,10 +100,29 @@ function formatMatchDate(dateString) {
     }
 }
 
+function isHistoricalSeason() {
+    return selectedSeason != null && currentSeason != null && selectedSeason < currentSeason;
+}
+
+// Tooltip for the league-position badge: names the selected season's table so an
+// archived view never claims to show the current UCL standings.
+function leaguePositionTitle() {
+    if (isHistoricalSeason()) {
+        const season = seasons.find(s => s.year === selectedSeason);
+        return `Position in the ${season ? season.label : selectedSeason} league table`;
+    }
+    return 'Position in current UCL league table';
+}
+
 // Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     console.log('DOM loaded, initializing...');
-    
+
+    // Resolve selectable seasons first so every season-dependent GET below and
+    // later carries the selected year. Falls back to backend default when the
+    // endpoint is unavailable.
+    await fetchSeasons();
+
     // Initialize primary view navigation
     initializePrimaryNav();
 
@@ -130,6 +161,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             refreshData();
+        });
+    }
+
+    // Season switcher
+    const seasonSelect = document.getElementById('seasonSelect');
+    if (seasonSelect) {
+        seasonSelect.addEventListener('change', () => {
+            const year = parseInt(seasonSelect.value, 10);
+            if (Number.isInteger(year)) switchSeason(year);
         });
     }
     
@@ -332,18 +372,112 @@ function initializeTabs() {
     });
 }
 
-async function loadCurrentStage() {
-    let stage = null;
+// ---------------------------------------------------------------------------
+// Season selection
+// ---------------------------------------------------------------------------
+function seasonQuery() {
+    return selectedSeason != null ? `?season=${selectedSeason}` : '';
+}
+
+async function fetchSeasons(attempt = 1) {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage`);
+        const response = await fetch(`${API_BASE_URL}/api/seasons`);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
+        const list = data && Array.isArray(data.seasons) ? data.seasons : [];
+        const current = data && Number.isInteger(data.currentSeason) ? data.currentSeason : null;
+        if (list.length > 0) {
+            seasons = list;
+            currentSeason = current != null ? current : list[0].year;
+        } else if (current != null) {
+            // Degenerate/older response: still offer the current season alone
+            // rather than leaving the switcher dead.
+            const next = String((current + 1) % 100).padStart(2, '0');
+            seasons = [{ year: current, label: `${current}/${next}` }];
+            currentSeason = current;
+        } else {
+            return; // nothing usable: keep the default (no season param) behaviour
+        }
+        selectedSeason = currentSeason;
+        renderSeasonOptions();
+    } catch (error) {
+        console.error('Error loading seasons:', error);
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            return fetchSeasons(attempt + 1);
+        }
+    }
+}
+
+function renderSeasonOptions() {
+    const select = document.getElementById('seasonSelect');
+    if (!select) return;
+    select.innerHTML = seasons.map(season =>
+        `<option value="${season.year}">${escapeHtml(season.label || String(season.year))}</option>`
+    ).join('');
+    if (selectedSeason != null) select.value = String(selectedSeason);
+    // A single season needs no switcher; disable to keep the control honest.
+    select.disabled = seasons.length <= 1;
+}
+
+// Switching seasons clears every payload tied to the previous season and
+// reloads all views. Generation guards (module counters + seasonGen) ensure a
+// late response for the old season can never paint over the new selection.
+async function switchSeason(year) {
+    if (year === selectedSeason) return;
+    selectedSeason = year;
+    const sgen = ++seasonGen;
+
+    solkoffDetailsCache = {};
+    playoffAnalysisCache = {};
+    pairsByStage = {};
+    currentPairsList = [];
+    currentPairIndex = -1;
+    expandedTeamId = null;
+    standingsData = [];
+    standingsState = 'loading';
+    overviewPairs = null;
+    pairsState = 'loading';
+    standingsRequested = true; // the reload below *is* the league load
+    closeActiveAnalysis({ invalidate: true, focusCard: false });
+
+    const tableBody = document.getElementById('standingsBody');
+    if (tableBody) tableBody.innerHTML = renderSkeletonRows(10);
+    renderOverview();
+
+    // Re-resolve the selected season's stage before reloading the views.
+    const stageBefore = currentRoute.stage;
+    await loadCurrentStage();
+    if (sgen !== seasonGen) return; // another switch happened mid-flight
+
+    // Generic Knockout may have been re-pointed at the season's stage already;
+    // a retained explicit stage still needs its pairs reloaded for the season.
+    if (currentRoute.view === 'knockout' && currentRoute.stage === stageBefore) {
+        loadTabContent(currentRoute.stage);
+    }
+    loadStandings();
+    loadOverviewKnockout();
+}
+
+async function loadCurrentStage() {
+    const sgen = seasonGen;
+    let stage = null;
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage${seasonQuery()}`);
+        if (sgen !== seasonGen) return; // season switched mid-flight
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        if (sgen !== seasonGen) return;
         stage = data.stage;
     } catch (error) {
+        if (sgen !== seasonGen) return;
         console.error('Error loading current stage:', error);
     }
+    if (sgen !== seasonGen) return;
     currentStage = stage || 'LEAGUE';
 
     let tabId = DEFAULT_KNOCKOUT_STAGE; // LEAGUE and failures fall back to Round of 16
@@ -426,7 +560,7 @@ let knockoutLoadGen = 0;
 
 function fetchKnockoutPairsOnce(stage) {
     if (!pairsByStage[stage]) {
-        const promise = fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}`)
+        const promise = fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}${seasonQuery()}`)
             .then(response => {
                 if (response.status === 404 || response.status === 400) {
                     const err = new Error(`No data available for ${stage}`);
@@ -615,7 +749,7 @@ function renderKnockoutPairs(pairs, container) {
             </div>
             <div class="pair-meta">
                 ${statusBadge}
-                ${pair.date ? `<span class="pair-date">${escapeHtml(formatMatchDate(pair.date))}</span>` : ''}
+                ${pair.date ? `<span class="pair-date">${escapeHtml(formatMatchDate(pair.date, isHistoricalSeason()))}</span>` : ''}
             </div>
             ${winProbabilityHtml}
             <span class="pair-analyze-btn">View Historical Analysis</span>
@@ -679,8 +813,8 @@ async function loadStandings() {
     tableBody.innerHTML = renderSkeletonRows(10);
 
     try {
-        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings`);
-        const response = await fetch(`${API_BASE_URL}/api/standings`);
+        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings${seasonQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -720,8 +854,9 @@ async function loadStandings() {
         tableBody.innerHTML = `<tr><td colspan="${visibleColumnCount()}" style="text-align: center; padding: 20px; color: #dc3545;">Error: ` + escapeHtml(error.message) + `</td></tr>`;
         renderOverviewStandings();
     } finally {
-        // Always hide loading
-        if (loadingEl) {
+        // Always hide loading — but never let a superseded load (newer request
+        // or a season switch) clear the indicator the current load owns.
+        if (loadingEl && gen === standingsGen) {
             loadingEl.style.display = 'none';
             console.log('Hiding loading indicator');
         }
@@ -885,8 +1020,9 @@ function createDetailRow(teamId) {
 }
 
 async function loadSolkoffDetails(teamId, detailCell) {
+    const sgen = seasonGen;
     try {
-        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details`);
+        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details${seasonQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -894,11 +1030,14 @@ async function loadSolkoffDetails(teamId, detailCell) {
         
         const details = await response.json();
         // A collapse or refresh re-render detaches this cell; a late response
-        // must not render into dead DOM nor poison the post-refresh cache.
+        // must not render into dead DOM nor poison the post-refresh cache. A
+        // season switch must not repopulate the previous season's cache either.
+        if (sgen !== seasonGen) return;
         if (!detailCell.isConnected) return;
         solkoffDetailsCache[teamId] = details;
         renderDetailContent(detailCell, details);
     } catch (error) {
+        if (sgen !== seasonGen) return;
         console.error('Error loading Solkoff details:', error);
         if (!detailCell.isConnected) return;
         detailCell.innerHTML = `<div class="detail-error">Error loading details: ${escapeHtml(error.message)}</div>`;
@@ -1141,7 +1280,7 @@ async function showPlayoffAnalysis(team1Id, team2Id, sourceCard) {
     content.innerHTML = '<div class="loading">Loading analysis...</div>';
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis`);
+        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis${seasonQuery()}`);
         if (gen !== analysisRequestGen) return; // selection/stage changed: drop late response
         
         if (!response.ok) {
@@ -1266,7 +1405,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id, gen) {
         // standingsData not loaded yet, try to load it
         console.log('standingsData not available, attempting to load...');
         try {
-            const response = await fetch(`${API_BASE_URL}/api/standings`);
+            const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
             if (response.ok) {
                 const loadedStandings = await response.json();
                 const team1MainStanding = loadedStandings.find(t => {
@@ -1527,13 +1666,13 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id, gen) {
             <div class="analysis-team ${winnerClass1}">
                 ${crestHtml(team1.crest, team1.name)}
                 <h3>${escapeHtml(team1.name)}</h3>
-                ${team1Position !== null ? `<span class="league-position" title="Position in current UCL league table">#${team1Position}</span>` : ''}
+                ${team1Position !== null ? `<span class="league-position" title="${escapeHtml(leaguePositionTitle())}">#${team1Position}</span>` : ''}
             </div>
             <div class="analysis-vs">vs</div>
             <div class="analysis-team ${winnerClass2}">
                 ${crestHtml(team2.crest, team2.name)}
                 <h3>${escapeHtml(team2.name)}</h3>
-                ${team2Position !== null ? `<span class="league-position" title="Position in current UCL league table">#${team2Position}</span>` : ''}
+                ${team2Position !== null ? `<span class="league-position" title="${escapeHtml(leaguePositionTitle())}">#${team2Position}</span>` : ''}
             </div>
         </div>
         
@@ -1815,6 +1954,18 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
             `;
             break;
         }
+        case 'historical_no_data':
+            explanation = `
+                <div class="probability-explanation">
+                    <h4>Why no win probability is shown:</h4>
+                    <p><strong>Method: historical archive</strong></p>
+                    <p>Win probability is unavailable for archived seasons. Elo and
+                    live strength ratings are built from present-day data, so using
+                    them here would leak results that happened after this season into
+                    its prediction. No estimate is shown rather than a misleading one.</p>
+                </div>
+            `;
+            break;
         case 'equal_strength':
         case 'default':
         case 'no_data':

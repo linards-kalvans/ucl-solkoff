@@ -232,6 +232,39 @@ header.topbar .controls {
     font-size: 12.5px;
 }
 
+/* Season switcher (header control, keyboard + touch friendly) */
+.season-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
+.season-control .season-label {
+    font-weight: 600;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+}
+
+.season-control select {
+    background: var(--surface-3);
+    color: var(--text);
+    border: 1px solid rgba(148, 163, 184, .3);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-size: 13.5px;
+    font-weight: 600;
+    min-height: 44px;
+    cursor: pointer;
+}
+
+.season-control select:disabled {
+    opacity: .6;
+    cursor: default;
+}
+
 /* ── Focus-visible (keyboard) ─────────────────────────────────────────── */
 .btn:focus-visible,
 .view-btn:focus-visible,

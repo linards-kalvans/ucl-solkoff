@@ -234,7 +234,9 @@ def test_no_hardcoded_season_or_trend(knockout_fixture, open_app, page):
     open_app("")
     expect(page.locator("#overview")).to_be_visible()
     expect(page.locator("#strengthRanking .rank-row").first).to_be_visible()
-    body = page.locator("body").inner_text()
+    # Overview content must not hardcode a season; the header season selector is
+    # the single, data-driven place a season may appear.
+    body = page.locator("#overview").inner_text()
     assert "2024/25" not in body
     # No fabricated trend deltas from the static prototype.
     assert not re.search(r"[▲▼]\s*\+\d", body)

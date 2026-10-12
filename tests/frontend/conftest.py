@@ -18,7 +18,7 @@ from collections import defaultdict
 from copy import deepcopy
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -322,6 +322,24 @@ class ApiRouter:
         self.refresh_sequence = None
         self._refresh_calls = 0
 
+        # Season switching: the app resolves seasons first and appends the
+        # selected year to season-dependent GETs. ``season_log`` records the
+        # requested year so tests can assert scoping; ``standings_by_season`` /
+        # ``pairs_by_season`` let a test vary a view per season.
+        self.seasons = {
+            "currentSeason": 2026,
+            "seasons": [
+                {"year": 2026, "label": "2026/27"},
+                {"year": 2025, "label": "2025/26"},
+                {"year": 2024, "label": "2024/25"},
+            ],
+        }
+        self.seasons_status = 200
+        self.season_log = []  # (method, path, season_param or None)
+        self.standings_by_season = {}
+        self.standings_status_by_season = {}
+        self.pairs_by_season = {}
+
         self.counts = defaultdict(int)
         self.log = []
         self._hold = []
@@ -351,6 +369,19 @@ class ApiRouter:
     def set_refresh(self, status=200):
         self.refresh_status = status
 
+    def set_seasons(self, data, status=200):
+        self.seasons = deepcopy(data)
+        self.seasons_status = status
+
+    def set_standings_for_season(self, year, data):
+        self.standings_by_season[int(year)] = deepcopy(data)
+
+    def set_standings_status_for_season(self, year, status):
+        self.standings_status_by_season[int(year)] = status
+
+    def set_pairs_for_season(self, year, stage, data):
+        self.pairs_by_season[(int(year), stage.upper())] = deepcopy(data)
+
     def hold_path(self, substring):
         """Hold the next request whose path contains ``substring``.
 
@@ -378,21 +409,24 @@ class ApiRouter:
     # -- Playwright route callback ----------------------------------------- #
     def route_request(self, route, *args):
         request = route.request
-        path = urlparse(request.url).path
+        parsed = urlparse(request.url)
+        path = parsed.path
         method = request.method.upper()
+        season = parse_qs(parsed.query).get("season", [None])[0]
         self.counts[f"{method} {path}"] += 1
         self.log.append((method, path))
+        self.season_log.append((method, path, season))
 
         for sub in list(self._hold):
             if sub in path:
                 self._hold.remove(sub)
                 # Snapshot the response now so a late release cannot pick up a
                 # newer fixture (which would mask stale-response bugs).
-                status, body = self._response(method, path)
+                status, body = self._response(method, path, season)
                 self._held_routes.append((route, status, body))
                 return
 
-        status, body = self._response(method, path)
+        status, body = self._response(method, path, season)
         self._fulfill(route, status, body)
 
     # -- response selection ------------------------------------------------- #
@@ -402,8 +436,23 @@ class ApiRouter:
         index = min(index, len(sequence) - 1)
         return sequence[index]
 
-    def _response(self, method, path):
+    def _season_year(self, season):
+        if season is None or not season.isdigit():
+            return None
+        return int(season)
+
+    def _response(self, method, path, season=None):
+        if path == "/api/seasons" and method == "GET":
+            return self.seasons_status, self.seasons
+
         if path == "/api/standings" and method == "GET":
+            year = self._season_year(season)
+            if year is not None and year in self.standings_status_by_season:
+                status = self.standings_status_by_season[year]
+                body = self.standings_by_season.get(year, self.standings)
+                return status, body
+            if year is not None and year in self.standings_by_season:
+                return 200, self.standings_by_season[year]
             self._standings_calls += 1
             seq = self._take(self.standings_sequence, self._standings_calls - 1)
             if seq is not None:
@@ -416,6 +465,9 @@ class ApiRouter:
         match = re.match(r"^/api/knockout-pairs/([A-Za-z0-9_]+)$", path)
         if match:
             stage = match.group(1).upper()
+            year = self._season_year(season)
+            if year is not None and (year, stage) in self.pairs_by_season:
+                return 200, self.pairs_by_season[(year, stage)]
             self._pairs_calls[stage] += 1
             seq = self._take(self.pairs_sequence.get(stage), self._pairs_calls[stage] - 1)
             if seq is not None:
