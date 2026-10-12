@@ -14,3 +14,8 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "uvicorn[standard]>=0.40.0",
 ]
+
+[dependency-groups]
+dev = [
+    "playwright>=1.63.0",
+]
