@@ -61,6 +61,18 @@ class FootballTxtParser:
                 self.current_competition = self._normalize_competition(comp_name)
                 logger.debug(f"Found competition: {comp_name}")
             
+            # Parse new-format (2024/25+) league-phase header, e.g. "League, Matchday 1"
+            elif 'league' in line.lower() and 'matchday' in line.lower():
+                self.current_stage = "LEAGUE_STAGE"
+                self.current_round = None
+                self.current_group = None
+
+            # Parse new-format play-off header, e.g. "Playoffs, Matchday 1"
+            elif 'playoff' in line.lower() or 'play-off' in line.lower():
+                self.current_stage = "KNOCKOUT_PLAYOFF"
+                self.current_round = "Knockout Play-off"
+                self.current_group = None
+
             # Parse group stage header
             elif 'Group' in line and ('|' in line or ':' in line):
                 self.current_stage = "GROUP_STAGE"
@@ -74,8 +86,9 @@ class FootballTxtParser:
                 for team_name in team_names:
                     teams.add(team_name)
             
-            # Parse knockout stage headers
-            elif any(keyword in line for keyword in ['Round of 16', 'Quarter-finals', 'Quarter-final', 'Semi-finals', 'Semi-final', 'Final']):
+            # Parse knockout stage headers (case-insensitive; covers one-word
+            # "Quarterfinals"/"Semifinals" and hyphenated forms).
+            elif self._is_knockout_heading(line):
                 self.current_stage = "KNOCKOUT"
                 self.current_group = None
                 self.current_round = self._extract_round_name(line)
@@ -147,6 +160,21 @@ class FootballTxtParser:
         
         return teams
     
+    def _is_knockout_heading(self, line: str) -> bool:
+        """True for knockout round headings, case-insensitively.
+
+        Covers the actual new-format headings ("Finals, Quarterfinals",
+        "Finals, Semifinals") as well as hyphenated and one-word spellings, so a
+        heading is never missed and the previous round is not carried over.
+        """
+        low = line.lower()
+        return any(key in low for key in (
+            'round of 16', 'last 16',
+            'quarterfinal', 'quarter-final', 'quarter final',
+            'semifinal', 'semi-final', 'semi final',
+            'final',
+        ))
+
     def _extract_round_name(self, line: str) -> str:
         """Extract round name from header line.
         
