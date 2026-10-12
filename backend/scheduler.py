@@ -45,7 +45,7 @@ class DataScheduler:
             raise
         
         self.data_service = DataService(self.db, self.api_client)
-        self.calculator = SolkoffCalculator(self.db)
+        self.calculator = SolkoffCalculator(self.db, competition_id=self.competition_id)
         self.elo_calculator = EloCalculator(self.db)
         self.scheduler = BackgroundScheduler()
     

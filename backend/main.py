@@ -13,6 +13,7 @@ from backend.database import Database
 from backend.scheduler import DataScheduler
 from backend.api_cache import APICache
 from backend.playoff_analyzer import PlayoffAnalyzer
+from backend.solkoff_calculator import get_season_bounds
 
 load_dotenv()
 
@@ -344,6 +345,10 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
         
         solkoff_value = float(solkoff_result[0]) if solkoff_result and solkoff_result[0] is not None else 0.0
         
+        # Current-season league-stage scope, matching the calculator exactly
+        competition_id = os.getenv("COMPETITION_ID", "CL")
+        season_start, season_end = get_season_bounds()
+        
         # Get opponent details with their points per game and match outcomes
         # First get all opponents from home matches with scores
         home_opponents = db.fetchall("""
@@ -360,8 +365,10 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
             JOIN teams t2 ON m.away_team_id = t2.id
             LEFT JOIN standings s2 ON m.away_team_id = s2.team_id
             WHERE m.home_team_id = ? AND m.status = 'FINISHED'
+              AND m.competition_id = ? AND m.stage = 'LEAGUE_STAGE'
+              AND m."date" >= ? AND m."date" < ?
             ORDER BY m.date DESC
-        """, (team_id,))
+        """, (team_id, competition_id, season_start, season_end))
         
         # Get all opponents from away matches with scores
         away_opponents = db.fetchall("""
@@ -378,8 +385,10 @@ async def get_solkoff_details(team_id: int) -> Dict[str, Any]:
             JOIN teams t2 ON m.home_team_id = t2.id
             LEFT JOIN standings s2 ON m.home_team_id = s2.team_id
             WHERE m.away_team_id = ? AND m.status = 'FINISHED'
+              AND m.competition_id = ? AND m.stage = 'LEAGUE_STAGE'
+              AND m."date" >= ? AND m."date" < ?
             ORDER BY m.date DESC
-        """, (team_id,))
+        """, (team_id, competition_id, season_start, season_end))
         
         # Combine and aggregate opponents with match details
         opponents_dict = {}
