@@ -83,6 +83,11 @@ resolves club identity by exact source name only: polluted (kickoff-prefixed)
 team rows are left intact and a clean node is created when no clean identity
 exists. It is not exposed through the API.
 
+The offline repair was applied in production on 2026-10-13 (see
+[Historical archive repair release](releases/2026-10-13-archive-repair.md));
+both archived seasons now contain exactly 36 clubs playing eight league games
+each, with correct knockout stages.
+
 ## Archived-season limitations
 
 - **Win probability is unavailable for archived seasons.** Elo and live-strength inputs
