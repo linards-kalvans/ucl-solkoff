@@ -7,6 +7,7 @@ from backend.api_client import APIClient
 from backend.github_data_fetcher import GitHubDataFetcher
 from backend.football_txt_parser import FootballTxtParser
 from backend.team_matcher import TeamMatcher
+from backend.fixture_ids import deterministic_match_id, effective_matchday
 
 logger = logging.getLogger(__name__)
 
@@ -531,12 +532,6 @@ class DataService:
                     matches_skipped += 1
                     continue
                 
-                # Generate synthetic match ID (negative to avoid conflicts with API IDs)
-                # Use hash of teams + date for consistency
-                match_key = f"{home_team_id}_{away_team_id}_{match_data.get('date', '')}"
-                match_id = abs(hash(match_key)) % (10 ** 9)  # 9-digit ID
-                match_id = -match_id  # Make negative to avoid conflicts
-                
                 # Parse date
                 match_date = match_data.get("date")
                 if not match_date:
@@ -562,22 +557,36 @@ class DataService:
                         matches_skipped += 1
                         continue
                 
-                # Determine matchday from stage/round
-                matchday = None
-                if match_data.get("stage") == "GROUP_STAGE":
-                    matchday = 1  # Default for group stage
-                elif match_data.get("round"):
-                    # Assign matchday based on round
-                    round_name = match_data.get("round", "").lower()
-                    if "round of 16" in round_name or "last 16" in round_name:
-                        matchday = 7
-                    elif "quarter" in round_name:
-                        matchday = 8
-                    elif "semi" in round_name:
-                        matchday = 9
-                    elif "final" in round_name:
-                        matchday = 10
-                
+                # Preserve the explicit parsed matchday (league 1..8, play-off
+                # leg 1/2). Only fall back to the legacy stage/round heuristic
+                # when the parser supplied no matchday. Shared with the repair
+                # tool so fixture IDs are identical across import and repair.
+                matchday = effective_matchday(
+                    match_data.get("matchday"), match_data.get("stage"),
+                    match_data.get("round"),
+                )
+
+                # Deterministic, hash-stable negative fixture ID; refuse to
+                # overwrite a different fixture that already owns this ID.
+                match_id = deterministic_match_id(
+                    comp_id, season_str, home_team_id, away_team_id,
+                    match_date, match_data.get("stage"), matchday,
+                )
+                existing = self.db.fetchone(
+                    'SELECT home_team_id, away_team_id, "date" FROM matches WHERE id = ?',
+                    (match_id,),
+                )
+                if existing and (
+                    existing[0], existing[1], existing[2]
+                ) != (home_team_id, away_team_id, match_date):
+                    logger.warning(
+                        f"Refusing fixture ID collision for {match_id}: "
+                        f"existing {(existing[0], existing[1], existing[2])} "
+                        f"!= staged {(home_team_id, away_team_id, match_date)}"
+                    )
+                    matches_skipped += 1
+                    continue
+
                 self.db.execute("""
                     INSERT INTO matches (
                         id, home_team_id, away_team_id, home_score, away_score,

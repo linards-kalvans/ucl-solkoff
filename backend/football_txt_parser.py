@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 class FootballTxtParser:
     """Parses structured football.txt format from openfootball repository."""
     
+    # Month name (3-letter) -> number, used for date headers and season rollover.
+    _MONTHS = {
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+    }
+
     def __init__(self):
         """Initialize parser."""
         self.current_season = None
@@ -18,6 +24,8 @@ class FootballTxtParser:
         self.current_stage = None
         self.current_round = None
         self.current_group = None
+        self.current_date = None
+        self.current_matchday = None
         
     def parse(self, content: str, competition: str = "CL", season: str = None) -> Dict[str, Any]:
         """Parse football.txt content.
@@ -42,6 +50,8 @@ class FootballTxtParser:
         self.current_stage = None
         self.current_round = None
         self.current_group = None
+        self.current_date = None
+        self.current_matchday = None
         
         lines = content.split('\n')
         teams = set()
@@ -52,6 +62,15 @@ class FootballTxtParser:
             line = lines[i].strip()
             
             if not line or line.startswith('#'):
+                i += 1
+                continue
+
+            # Date headers come first so every following match inherits the
+            # nearest active date. Dates are tracked sequentially and reset per
+            # parse; there is no fixed lookback window.
+            header_date = self._parse_date_header(line)
+            if header_date:
+                self.current_date = header_date
                 i += 1
                 continue
             
@@ -66,17 +85,20 @@ class FootballTxtParser:
                 self.current_stage = "LEAGUE_STAGE"
                 self.current_round = None
                 self.current_group = None
+                self.current_matchday = self._extract_matchday(line)
 
             # Parse new-format play-off header, e.g. "Playoffs, Matchday 1"
             elif 'playoff' in line.lower() or 'play-off' in line.lower():
                 self.current_stage = "KNOCKOUT_PLAYOFF"
                 self.current_round = "Knockout Play-off"
                 self.current_group = None
+                self.current_matchday = self._extract_matchday(line)
 
             # Parse group stage header
             elif 'Group' in line and ('|' in line or ':' in line):
                 self.current_stage = "GROUP_STAGE"
                 self.current_round = None
+                self.current_matchday = None
                 # Extract group name
                 group_match = re.search(r'Group\s+([A-H])', line, re.IGNORECASE)
                 if group_match:
@@ -91,12 +113,13 @@ class FootballTxtParser:
             elif self._is_knockout_heading(line):
                 self.current_stage = "KNOCKOUT"
                 self.current_group = None
+                self.current_matchday = None
                 self.current_round = self._extract_round_name(line)
                 logger.debug(f"Found round: {self.current_round}")
             
             # Parse match lines
             elif self._is_match_line(line):
-                match_data = self._parse_match_line(line, i, lines)
+                match_data = self._parse_match_line(line)
                 if match_data:
                     matches.append(match_data)
                     # Extract teams from match
@@ -226,203 +249,150 @@ class FootballTxtParser:
         
         return True
     
-    def _parse_match_line(self, line: str, line_num: int, all_lines: List[str]) -> Optional[Dict[str, Any]]:
-        """Parse a single match line.
-        
-        Args:
-            line: Match line to parse
-            line_num: Current line number
-            all_lines: All lines for context
-            
-        Returns:
-            Match dictionary or None if parsing fails
+    def _extract_matchday(self, line: str) -> Optional[int]:
+        """Numeric matchday from a header like ``League, Matchday 3``."""
+        m = re.search(r'matchday\s+(\d+)', line, re.IGNORECASE)
+        return int(m.group(1)) if m else None
+
+    def _season_year(self) -> Optional[int]:
+        """Start year parsed from the active season identifier."""
+        if self.current_season:
+            m = re.search(r'(\d{4})', str(self.current_season))
+            if m:
+                return int(m.group(1))
+        return None
+
+    def _parse_date_header(self, line: str) -> Optional[str]:
+        """Resolve a date-header line to ISO ``YYYY-MM-DD``.
+
+        Supports ISO headers and weekday/month/day headers with an optional
+        explicit year (``Tue Sep 17 2024``, ``Wed Sep/7``, ``Tue Mar 4``). When
+        the year is absent it is resolved from the active season using the
+        August boundary. Returns ``None`` for any line that is not a date.
+        """
+        iso_match = re.search(r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b', line)
+        if iso_match:
+            year, month, day = iso_match.groups()
+            month_i, day_i = int(month), int(day)
+            if 1 <= month_i <= 12 and 1 <= day_i <= 31:
+                return f"{int(year):04d}-{month_i:02d}-{day_i:02d}"
+            return None
+
+        m = re.search(
+            r'([A-Za-z]{3,9})\s+([A-Za-z]{3,9})[/\s]+(\d{1,2})(?:\s+(\d{4}))?',
+            line,
+        )
+        if not m:
+            return None
+
+        month_i = self._MONTHS.get(m.group(2).lower()[:3])
+        if not month_i:
+            return None
+        day_i = int(m.group(3))
+        if not 1 <= day_i <= 31:
+            return None
+
+        if m.group(4):
+            year_i = int(m.group(4))
+        else:
+            season_year = self._season_year()
+            if season_year is None:
+                return None
+            year_i = season_year if month_i >= 8 else season_year + 1
+
+        return f"{year_i:04d}-{month_i:02d}-{day_i:02d}"
+
+    def _parse_match_line(self, line: str) -> Optional[Dict[str, Any]]:
+        """Parse a single match line using the active parser state.
+
+        The kickoff time (colon or dot) is consumed as a prefix and never
+        reaches the team names. The match score is the underlying result, not a
+        penalty-shootout tally. The date/stage/matchday come from the nearest
+        preceding headers.
         """
         try:
-            # Extract date from previous lines if available
-            date = self._extract_date_from_context(line_num, all_lines)
-            
-            # Extract time
-            time_match = re.search(r'(\d{1,2}\.\d{2})', line)
-            match_time = time_match.group(1) if time_match else None
-            
-            # Extract score
-            score_match = re.search(r'(\d+)-(\d+)', line)
-            if not score_match:
+            # Kickoff prefix: "18:45 ..." or "20.45 ..." (colon and dot forms).
+            time_match = re.match(r'^(\d{1,2})[:.](\d{2})\s+', line)
+            match_time = None
+            if time_match:
+                match_time = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+                line = line[time_match.end():].strip()
+
+            # All score candidates; annotated lines may carry shootout/aggregate.
+            scores = list(re.finditer(r'(\d+)\s*-\s*(\d+)', line))
+            if not scores:
                 return None
-            
+            score_match = self._choose_score(scores, line)
             home_score = int(score_match.group(1))
             away_score = int(score_match.group(2))
-            
-            # Extract teams (before and after score)
-            # Common patterns:
-            # - "20.45 Team1 v Team2 1-1"
-            # - "Team1 v Team2 1-1 @ Venue"
-            # - "Team1 Team2 1-1"
-            
-            # Try pattern with 'v' first
-            parts = re.split(r'\s+v\s+', line, flags=re.IGNORECASE)
-            if len(parts) >= 2:
-                home_team = parts[0].strip()
-                # Remove time from home team
-                home_team = re.sub(r'\d{1,2}\.\d{2}', '', home_team).strip()
-                
-                # Away team is before score in second part
-                away_part = parts[1]
-                score_pos = away_part.find(score_match.group(0))
-                if score_pos > 0:
-                    away_team = away_part[:score_pos].strip()
-                else:
-                    # Score might be before team name
-                    away_team = away_part.split()[0] if away_part.split() else None
+
+            parts = re.split(r'\s+v\s+', line, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2:
+                home_raw = parts[0]
+                rest = parts[1]
+                score_pos = re.search(r'\d+\s*-\s*\d+', rest)
+                away_raw = rest[:score_pos.start()] if score_pos else rest
             else:
-                # Try without 'v' - split by score
-                score_pos = line.find(score_match.group(0))
-                if score_pos > 0:
-                    before_score = line[:score_pos].strip()
-                    after_score = line[score_pos + len(score_match.group(0)):].strip()
-                    
-                    # Remove time and venue info
-                    before_score = re.sub(r'\d{1,2}\.\d{2}', '', before_score).strip()
-                    after_score = re.sub(r'@\s+[^,]+', '', after_score).strip()
-                    
-                    # Extract team names (usually last 1-3 words before score, first 1-3 words after)
-                    before_words = [w for w in before_score.split() if w and not w.isdigit()]
-                    after_words = [w for w in after_score.split() if w and not w.isdigit()]
-                    
-                    if len(before_words) >= 2:
-                        # Try last 2-3 words as team name
-                        home_team = ' '.join(before_words[-2:])
-                        if len(before_words) >= 3:
-                            # Try 3 words if it makes sense
-                            home_team_alt = ' '.join(before_words[-3:])
-                            if len(home_team_alt.split()) <= 4:  # Reasonable team name length
-                                home_team = home_team_alt
-                    elif len(before_words) == 1:
-                        home_team = before_words[0]
-                    else:
-                        return None
-                    
-                    if len(after_words) >= 2:
-                        away_team = ' '.join(after_words[:2])
-                        if len(after_words) >= 3:
-                            away_team_alt = ' '.join(after_words[:3])
-                            if len(away_team_alt.split()) <= 4:
-                                away_team = away_team_alt
-                    elif len(after_words) == 1:
-                        away_team = after_words[0]
-                    else:
-                        return None
-                else:
-                    return None
-            
+                # Legacy fallback: split around the first score occurrence.
+                first = scores[0]
+                home_raw = line[:first.start()]
+                away_raw = line[first.end():]
+
+            home_team = self._clean_team_name(home_raw)
+            away_team = self._clean_team_name(away_raw)
+
             if not home_team or not away_team:
                 return None
-            
-            # Clean team names
-            home_team = self._clean_team_name(home_team)
-            away_team = self._clean_team_name(away_team)
-            
-            if not home_team or not away_team:
-                return None
-            
-            # Determine status
-            status = "FINISHED" if home_score is not None and away_score is not None else "SCHEDULED"
-            
-            # Extract venue if present
+
             venue_match = re.search(r'@\s+([^,]+)', line)
             venue = venue_match.group(1).strip() if venue_match else None
-            
-            match_data = {
+
+            return {
                 "home_team": home_team,
                 "away_team": away_team,
                 "home_score": home_score,
                 "away_score": away_score,
-                "date": date,
+                "date": self.current_date,
                 "time": match_time,
-                "status": status,
+                "status": "FINISHED",
                 "stage": self.current_stage,
                 "round": self.current_round,
                 "group_name": self.current_group,
+                "matchday": self.current_matchday,
                 "competition_id": self.current_competition,
-                "venue": venue
+                "venue": venue,
             }
-            
-            return match_data
-            
+
         except Exception as e:
             logger.debug(f"Error parsing match line '{line}': {e}")
             return None
-    
-    def _extract_date_from_context(self, line_num: int, all_lines: List[str], lookback: int = 10) -> Optional[str]:
-        """Extract date from previous lines.
-        
-        Args:
-            line_num: Current line number
-            all_lines: All lines
-            lookback: Number of lines to look back
-            
-        Returns:
-            Date string in YYYY-MM-DD format or None
+
+    def _choose_score(self, scores: List[re.Match], line: str) -> re.Match:
+        """Pick the underlying match score, skipping shootout/aggregate tallies.
+
+        Penalty and extra-time annotations are written as ``1-4 pen. 0-1 a.e.t.
+        (0-1, 0-1)``: the a.e.t. score is the real result and the ``pen.`` score
+        is the shootout. Prefer the score immediately before the first
+        ``a.e.t``/``aet`` marker, then before ``pen``; otherwise the first
+        (regulation) score.
         """
-        import calendar
-        
-        # Determine season year from self.current_season
-        season_year = None
-        if self.current_season:
-            # Extract year from season string (e.g., "2023-24" -> 2023)
-            year_match = re.search(r'(\d{4})', self.current_season)
-            if year_match:
-                season_year = int(year_match.group(1))
-        
-        # Look back for date patterns
-        for i in range(max(0, line_num - lookback), line_num):
-            line = all_lines[i].strip()
-            
-            # Pattern: "2023-04-01" or "2023/04/01" (ISO format)
-            iso_match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', line)
-            if iso_match:
-                year, month, day = iso_match.groups()
-                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-            
-            # Pattern: "Tue Apr/1" or "Tuesday April 1" (relative date)
-            date_match = re.search(r'([A-Za-z]{3,9})\s+([A-Za-z]{3,9})[/\s]+(\d{1,2})', line)
-            if date_match and season_year:
-                try:
-                    month_name = date_match.group(2)
-                    day = int(date_match.group(3))
-                    
-                    # Map month names to numbers
-                    month_map = {
-                        'jan': 1, 'january': 1,
-                        'feb': 2, 'february': 2,
-                        'mar': 3, 'march': 3,
-                        'apr': 4, 'april': 4,
-                        'may': 5,
-                        'jun': 6, 'june': 6,
-                        'jul': 7, 'july': 7,
-                        'aug': 8, 'august': 8,
-                        'sep': 9, 'september': 9,
-                        'oct': 10, 'october': 10,
-                        'nov': 11, 'november': 11,
-                        'dec': 12, 'december': 12
-                    }
-                    
-                    month_lower = month_name.lower()[:3]
-                    if month_lower in month_map:
-                        month = month_map[month_lower]
-                        # Determine year based on month and season
-                        # Season runs Aug-Jul, so months Aug-Dec are season_year, Jan-Jul are season_year+1
-                        if month >= 8:
-                            year = season_year
-                        else:
-                            year = season_year + 1
-                        
-                        return f"{year}-{month:02d}-{day:02d}"
-                except (ValueError, KeyError):
-                    pass
-        
-        return None
-    
+        low = line.lower()
+        markers = []
+        for token in ('a.e.t', 'aet'):
+            pos = low.find(token)
+            if pos != -1:
+                markers.append(pos)
+                break
+        pen_pos = low.find('pen')
+        if pen_pos != -1:
+            markers.append(pen_pos)
+
+        for pos in markers:
+            before = [s for s in scores if s.start() < pos]
+            if before:
+                return before[-1]
+        return scores[0]
+
     def _clean_team_name(self, name: str) -> str:
         """Clean and normalize team name.
         

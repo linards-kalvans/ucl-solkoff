@@ -69,6 +69,20 @@ safely:
   play-off round.
 - Anything else untagged is left **unclassified** rather than guessed onto a wrong tab.
 
+### Archive repair
+
+Archived 2024/25 and 2025/26 fixtures are rebuilt offline from checksum-pinned
+openfootball `cl.txt` sources by `backend/historical_repair.py`. The tool is
+**dry-run by default** (`--apply` to write), performs no network access while
+applying, and replaces only CL fixtures inside the two approved Aug 1–Aug 1
+windows in a **single transaction**. It never modifies `standings`,
+`elo_ratings`, `solkoff_coefficients` or `api_cache`; it rewrites only the
+canonical source-name keys in `team_mappings` to their chosen clean club ids and
+leaves every other mapping row unchanged. It is idempotent when re-run, and
+resolves club identity by exact source name only: polluted (kickoff-prefixed)
+team rows are left intact and a clean node is created when no clean identity
+exists. It is not exposed through the API.
+
 ## Archived-season limitations
 
 - **Win probability is unavailable for archived seasons.** Elo and live-strength inputs
