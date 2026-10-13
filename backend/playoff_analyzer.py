@@ -439,22 +439,24 @@ class PlayoffAnalyzer:
             },
             'ROUND_OF_16': {
                 'round_patterns': ['%ROUND_OF_16%', '%ROUND OF 16%', '%LAST_16%'],
-                'stage_values': ['LAST_16'],
+                'stage_values': ['ROUND_OF_16', 'LAST_16'],
                 'matchday_range': (9, 10)
             },
             'QUARTER_FINAL': {
                 'round_patterns': ['%QUARTER%'],
-                'stage_values': [],
+                'stage_values': ['QUARTER_FINAL', 'QUARTER_FINALS'],
                 'matchday_range': (11, 12)
             },
             'SEMI_FINAL': {
                 'round_patterns': ['%SEMI%'],
-                'stage_values': [],
+                'stage_values': ['SEMI_FINAL', 'SEMI_FINALS'],
                 'matchday_range': (13, 14)
             },
             'FINAL': {
+                # Distinct final: a plain '%FINAL%' LIKE would also match
+                # "Quarter-final"/"Semi-final". Match the standalone round only.
                 'round_patterns': ['%FINAL%'],
-                'stage_values': [],
+                'stage_values': ['FINAL'],
                 'matchday_range': (15, 999)
             }
         }
@@ -484,7 +486,11 @@ class PlayoffAnalyzer:
             query_params.append(f"{season_start_year}-08-01")
         
         round_conditions = []
-        if filters['round_patterns']:
+        if stage == 'FINAL':
+            # Exact standalone round, trimmed and case-insensitive: never match
+            # the "final" substring inside Quarter-final/Semi-final.
+            round_conditions.append("UPPER(TRIM(m.round)) = 'FINAL'")
+        elif filters['round_patterns']:
             for pattern in filters['round_patterns']:
                 round_conditions.append(f"UPPER(m.round) LIKE '{pattern}'")
         
@@ -502,20 +508,17 @@ class PlayoffAnalyzer:
         if stage_conditions:
             stage_round_conditions.append(f"({' OR '.join(stage_conditions)})")
         if matchday_min:
+            # Matchday fallback is only for genuinely untyped rows: NULL/blank
+            # round with a generic (NULL or 'KNOCKOUT') stage. A row that
+            # explicitly declares a stage or round must never fall into a
+            # sibling tab's range.
             fallback = (
                 f"(m.matchday >= {matchday_min} AND m.matchday <= {matchday_max} "
                 "AND (m.group_name IS NULL OR m.group_name = '') "
-                "AND (m.stage IS NULL OR m.stage != 'LEAGUE_STAGE')"
+                "AND (m.round IS NULL OR m.round = '') "
+                "AND (m.stage IS NULL OR m.stage = 'KNOCKOUT'))"
             )
-            if stage == 'KNOCKOUT_PLAYOFF':
-                # The (1, 10) matchday catch-all overlaps the Round of 16, so a
-                # row that explicitly declares a later round must not fall into
-                # the play-off tab.
-                fallback += (
-                    ' AND (m."round" IS NULL OR UPPER(m."round") LIKE \'%PLAY_OFF%\' '
-                    'OR UPPER(m."round") LIKE \'%PLAYOFF%\')'
-                )
-            stage_round_conditions.append(fallback + ")")
+            stage_round_conditions.append(fallback)
 
         # Legacy stored play-off ties (imported before new-format headers were
         # recognised) have NULL stage/round/group/matchday. Only a historical

@@ -30,6 +30,7 @@
 - Tests in `tests/backend/test_historical_repair.py`: faithful reproduction, scoped replacement, ambiguous mapping refusal, failed validation leaves DB unchanged, no current/other-comp mutations, stable IDs, repeated application.
 
 ## 4. Production gates
+- Repair acceptance exposed a required integration fix in `backend/playoff_analyzer.py::get_pairs_by_stage`: explicit round/stage metadata must override matchday fallback, and final must not match quarter/semi-final substrings. Add TDD regression tests in `tests/backend/test_knockout_stage_scope.py` using repaired historical shapes; verify stage tie counts 8/8/4/2/1 for both pinned seasons. Review this focused fix and rebuild candidate before retrying repair; prior failed attempt was safely restored from its fresh snapshot.
 - Use fresh protected snapshot and offline candidate-copy rehearsal. Store diagnostics/backups under private directories, never commit DB/source secrets. Source fixtures can be checked in if public and proportional; source URLs, commit and SHA256 must be recorded.
 - Independent code review must approve repair isolation and rollback before production writes.
 - Follow `DEPLOYMENT.md` with latest authoritative record `docs/releases/2026-10-12-season-switching-release.md`: preserve protected active override and existing data bind, secrets, loopback and Caddy method restriction. Use immutable source bundle whitelist and candidate image; smoke on separate temporary DB/port before downtime.
