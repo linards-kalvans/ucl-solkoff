@@ -44,6 +44,40 @@ Behavior:
 - A **valid season with no stored data returns an empty state** for that season; it
   never falls back to another season.
 
+## Knockout pair results
+
+The pair endpoints (`GET /api/playoff-pairs` and `GET /api/knockout-pairs/{stage}`)
+additively expose stored knockout results on every pair payload. All existing
+fields (`matchId`, `team1`, `team2`, `matchday`, `stage`, `status`, `date`,
+`apiStage`, `apiRound`, `winProbability`) are unchanged.
+
+Each pair gains two fields:
+
+- **`legs`** — the tie's fixtures in chronological order (by date, then match id).
+  Each leg is `{matchId, homeTeamId, awayTeamId, homeScore, awayScore, status,
+  date}`. `homeScore`/`awayScore` are the stored goals as-is; an unscored fixture
+  keeps `null` and is never coerced to `0`.
+- **`aggregateScore`** — integer goal totals `{team1, team2}`, present **only** for
+  a completed two-leg tie: exactly two `FINISHED` legs with both scores available;
+  otherwise `null`. Both totals are oriented to the pair's stable `team1`/`team2`
+  identity, never to the latest leg's home/away order. A level aggregate is a
+  level aggregate — stored goals do not encode a penalty shootout, so no winner,
+  advancement, or penalties field is inferred.
+
+A single-match final exposes its own result (one leg, no aggregate). Fixtures from
+a different round for the same two teams are never summed into an aggregate. The
+contract applies to archived seasons too, which keep their true leg dates;
+`winProbability` stays unavailable there as before.
+
+### Rendering
+
+- Full pair cards list each scored leg with Home/Away labels plus an explicitly
+  labelled **Aggregate** line when available.
+- Overview mini previews show a compact aggregate, or the score of a genuine
+  single-leg fixture oriented to the stable teams.
+- Scheduled or unscored ties render no score; malformed values are rejected rather
+  than coerced.
+
 ## How historical data is reconstructed
 
 Selecting a season is **read-only**: no database writes, no data collection, no

@@ -97,7 +97,71 @@ class PlayoffAnalyzer:
         except (ValueError, AttributeError, TypeError) as e:
             logger.debug(f"Invalid date format: {date_str}, error: {e}")
             return False
-    
+
+    @staticmethod
+    def _fixture_from_match(match: Tuple[Any, ...]) -> Dict[str, Any]:
+        """Build the additive leg contract for one stored fixture row.
+
+        ``home_score``/``away_score`` are the two score columns appended to both
+        pair queries; a missing score stays ``None`` and is never coerced to 0.
+        """
+        return {
+            "matchId": match[0],
+            "homeTeamId": match[1],
+            "awayTeamId": match[2],
+            "homeScore": match[12],
+            "awayScore": match[13],
+            "status": match[3],
+            "date": match[5],
+        }
+
+    @staticmethod
+    def _attach_results(pair: Dict[str, Any],
+                        fixtures: List[Dict[str, Any]]) -> None:
+        """Attach chronological ``legs`` and a stable-team ``aggregateScore``.
+
+        Legs keep every selected fixture ordered by date. The aggregate exists
+        only for a completed two-leg tie (exactly two ``FINISHED`` legs with both
+        scores available) and is oriented by the pair's stable team1/team2
+        identity, never by the latest leg's home/away order. A drawn aggregate
+        stays a draw: stored goals cannot encode a shootout winner.
+        """
+        legs = sorted(fixtures, key=lambda f: (f.get("date") or "", f["matchId"]))
+        pair["legs"] = legs
+
+        aggregate = None
+        if (len(legs) == 2
+                and all(leg["status"] == "FINISHED" for leg in legs)
+                and all(leg["homeScore"] is not None and leg["awayScore"] is not None
+                        for leg in legs)):
+            team1_id = pair["team1"]["id"]
+            team1_total = 0
+            team2_total = 0
+            for leg in legs:
+                if leg["homeTeamId"] == team1_id:
+                    team1_total += leg["homeScore"]
+                    team2_total += leg["awayScore"]
+                else:
+                    team1_total += leg["awayScore"]
+                    team2_total += leg["homeScore"]
+            aggregate = {"team1": team1_total, "team2": team2_total}
+        pair["aggregateScore"] = aggregate
+
+    @staticmethod
+    def _retained_fixtures(pair: Dict[str, Any],
+                           fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]]
+                           ) -> List[Dict[str, Any]]:
+        """Return the pair's fixtures that belong to its determined stage.
+
+        Fixtures are collected per team pair, but a pair may have rows from
+        different rounds (e.g. a Round of 16 and a Final for the same teams).
+        Attachment must use only the retained pair's stage so unrelated rounds
+        can never be summed into a fictitious aggregate.
+        """
+        key = tuple(sorted([pair["team1"]["id"], pair["team2"]["id"]]))
+        return [fixture for fixture_stage, fixture in fixtures_by_pair.get(key, [])
+                if fixture_stage == pair["stage"]]
+
     def get_playoff_pairs(self, competition_id: str = "CL", stage: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get current play-off pairs from the competition.
         
@@ -147,7 +211,9 @@ class PlayoffAnalyzer:
                 t1.name as home_team_name,
                 t1.crest as home_team_crest,
                 t2.name as away_team_name,
-                t2.crest as away_team_crest
+                t2.crest as away_team_crest,
+                m.home_score,
+                m.away_score
             FROM matches m
             JOIN teams t1 ON m.home_team_id = t1.id
             JOIN teams t2 ON m.away_team_id = t2.id
@@ -179,6 +245,7 @@ class PlayoffAnalyzer:
         # In knockout stages, teams play each other in two-legged ties
         # We identify pairs by finding teams that play each other
         pairs_dict = {}
+        fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]] = {}
         
         for match in matches:
             home_id = match[1]
@@ -246,7 +313,13 @@ class PlayoffAnalyzer:
                     stage = "Knockout Round Play-off"
                 else:
                     continue
-            
+            # Retain every selected fixture (tagged with its determined stage)
+            # so the pair can expose chronological leg results once grouping is
+            # complete.
+            fixtures_by_pair.setdefault(pair_key, []).append(
+                (stage, self._fixture_from_match(match)))
+
+
             # If we haven't seen this pair, or if this is a more recent match, update it
             if pair_key not in pairs_dict:
                 pairs_dict[pair_key] = {
@@ -287,7 +360,10 @@ class PlayoffAnalyzer:
         
         # Convert to list and sort by stage and matchday
         pairs = list(pairs_dict.values())
-        
+
+        for pair in pairs:
+            self._attach_results(pair, self._retained_fixtures(pair, fixtures_by_pair))
+
         # Sort by stage priority and matchday
         stage_priority = {
             "Knockout Round Play-off": 1,
@@ -548,7 +624,9 @@ class PlayoffAnalyzer:
                 t1.name as home_team_name,
                 t1.crest as home_team_crest,
                 t2.name as away_team_name,
-                t2.crest as away_team_crest
+                t2.crest as away_team_crest,
+                m.home_score,
+                m.away_score
             FROM matches m
             JOIN teams t1 ON m.home_team_id = t1.id
             JOIN teams t2 ON m.away_team_id = t2.id
@@ -560,6 +638,7 @@ class PlayoffAnalyzer:
         
         # Group matches into pairs
         pairs_dict = {}
+        fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]] = {}
         stage_display_name = {
             'KNOCKOUT_PLAYOFF': 'Knockout Round Play-off',
             'ROUND_OF_16': 'Round of 16',
@@ -579,7 +658,13 @@ class PlayoffAnalyzer:
                 continue
             
             pair_key = tuple(sorted([home_id, away_id]))
-            
+
+            # Retain every selected fixture (tagged with this stage) so the pair
+            # can expose chronological leg results once grouping is complete.
+            fixtures_by_pair.setdefault(pair_key, []).append(
+                (stage_display_name.get(stage, stage),
+                 self._fixture_from_match(match)))
+
             if pair_key not in pairs_dict:
                 pairs_dict[pair_key] = {
                     "matchId": match[0],
@@ -616,7 +701,10 @@ class PlayoffAnalyzer:
                         existing_pair["date"] = match[5]
         
         pairs = list(pairs_dict.values())
-        
+
+        for pair in pairs:
+            self._attach_results(pair, self._retained_fixtures(pair, fixtures_by_pair))
+
         # Calculate win probability for each pair using the same method as analyze_pair
         # This ensures consistency between pair cards and historical analysis popup
         # Archived seasons omit probabilities: present-day Elo/live-strength inputs

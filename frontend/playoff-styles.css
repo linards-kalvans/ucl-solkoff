@@ -150,6 +150,71 @@
     gap: 8px;
 }
 
+/* Stored knockout results: chronological scored legs + labelled aggregate. */
+.pair-results {
+    margin: 8px 0;
+    padding: 8px;
+    background: rgba(4, 14, 26, .35);
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+.pair-leg {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 2px 0;
+}
+
+.leg-side {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+
+.pair-leg .leg-side:last-child {
+    text-align: right;
+}
+
+.leg-tag {
+    font-size: 0.75em;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--accent-2);
+    margin-right: 4px;
+}
+
+.leg-score {
+    flex: 0 0 auto;
+    font-weight: bold;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
+.pair-aggregate {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(148, 163, 184, .16);
+    font-weight: 600;
+}
+
+.aggregate-label {
+    color: var(--accent-2);
+}
+
+.aggregate-score {
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
 .pair-probability {
     display: flex;
     align-items: center;

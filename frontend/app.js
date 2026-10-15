@@ -667,6 +667,88 @@ function showDataNotAvailable(container, stage, kind = 'empty') {
     `;
 }
 
+// A real stored score is a non-negative finite integer. Strings, booleans,
+// null and fractions are rejected so no malformed value can be coerced to 0 or
+// injected into markup (values are interpolated, not escaped).
+function isScoreValue(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+// Both scores must be real score values; a missing/malformed side is never
+// rendered as an invented 0-0.
+function hasBothScores(leg) {
+    return !!leg && isScoreValue(leg.homeScore) && isScoreValue(leg.awayScore);
+}
+
+// Only a well-formed two-entry aggregate of real score values is used; a
+// partial, null, string or otherwise malformed aggregate is unavailable.
+function normalizeAggregate(aggregate) {
+    if (!aggregate) return null;
+    if (!isScoreValue(aggregate.team1) || !isScoreValue(aggregate.team2)) return null;
+    return { team1: aggregate.team1, team2: aggregate.team2 };
+}
+
+// Orient a single fixture's goals to the pair's stable team1/team2 identity, so
+// a preview never flips the score when the payload's home side is team2.
+function legTeamScores(pair, leg) {
+    const team1Id = Number((pair.team1 || {}).id);
+    return Number(leg.homeTeamId) === team1Id
+        ? { team1: leg.homeScore, team2: leg.awayScore }
+        : { team1: leg.awayScore, team2: leg.homeScore };
+}
+
+// Resolve a leg's team id to the pair's stable team name, so orientation never
+// depends on the latest leg's home/away order.
+function pairTeamName(pair, teamId) {
+    const t1 = pair.team1 || {};
+    const t2 = pair.team2 || {};
+    if (Number(t1.id) === Number(teamId)) return t1.name || '';
+    if (Number(t2.id) === Number(teamId)) return t2.name || '';
+    return '';
+}
+
+// Full-card results: every scored leg with home/away labels plus an explicitly
+// labelled aggregate. Unscored/scheduled fixtures contribute nothing, so no
+// score is ever fabricated. A drawn aggregate is labelled a draw, never a
+// winner (stored goals cannot encode a shootout).
+function pairResultsHtml(pair) {
+    const legs = Array.isArray(pair.legs) ? pair.legs.filter(hasBothScores) : [];
+    const aggregate = normalizeAggregate(pair.aggregateScore);
+    if (legs.length === 0 && !aggregate) return '';
+
+    const legHtml = legs.map(leg =>
+        `<div class="pair-leg">` +
+        `<span class="leg-side"><span class="leg-tag">Home</span> ${escapeHtml(pairTeamName(pair, leg.homeTeamId))}</span>` +
+        `<span class="leg-score">${leg.homeScore}-${leg.awayScore}</span>` +
+        `<span class="leg-side"><span class="leg-tag">Away</span> ${escapeHtml(pairTeamName(pair, leg.awayTeamId))}</span>` +
+        `</div>`
+    ).join('');
+
+    const aggregateHtml = aggregate
+        ? `<div class="pair-aggregate"><span class="aggregate-label">Aggregate</span> ` +
+          `<span class="aggregate-score">${aggregate.team1}-${aggregate.team2}</span></div>`
+        : '';
+
+    return `<div class="pair-results">${legHtml}${aggregateHtml}</div>`;
+}
+
+// Compact preview result: the aggregate when available, otherwise the score of
+// a genuine single-leg fixture. A partial two-leg tie never masquerades as a
+// single match, and scheduled/unscored ties render nothing.
+function miniResultsHtml(pair) {
+    const aggregate = normalizeAggregate(pair.aggregateScore);
+    if (aggregate) {
+        return `<div class="mini-result"><span class="aggregate-label">Aggregate</span> ` +
+            `<span class="aggregate-score">${aggregate.team1}-${aggregate.team2}</span></div>`;
+    }
+    const legs = Array.isArray(pair.legs) ? pair.legs : [];
+    if (legs.length === 1 && hasBothScores(legs[0])) {
+        const score = legTeamScores(pair, legs[0]);
+        return `<div class="mini-result">${score.team1}-${score.team2}</div>`;
+    }
+    return '';
+}
+
 function renderKnockoutPairs(pairs, container) {
     container.innerHTML = '';
     
@@ -751,6 +833,7 @@ function renderKnockoutPairs(pairs, container) {
                 ${statusBadge}
                 ${pair.date ? `<span class="pair-date">${escapeHtml(formatMatchDate(pair.date, isHistoricalSeason()))}</span>` : ''}
             </div>
+            ${pairResultsHtml(pair)}
             ${winProbabilityHtml}
             <span class="pair-analyze-btn">View Historical Analysis</span>
         `;
@@ -2499,7 +2582,7 @@ function miniMatchHtml(pair) {
         ` aria-label="Open analysis for ${escapeHtml(t1.name)} vs ${escapeHtml(t2.name)}">` +
         `<div class="mini-row">${crestHtml(t1.crest, t1.name)}<span>${escapeHtml(t1.name)}</span></div>` +
         `<div class="mini-row">${crestHtml(t2.crest, t2.name)}<span>${escapeHtml(t2.name)}</span></div>` +
-        prob + '</button>';
+        miniResultsHtml(pair) + prob + '</button>';
 }
 
 function openKnockoutPairFromOverview(stageKey, team1Id, team2Id) {

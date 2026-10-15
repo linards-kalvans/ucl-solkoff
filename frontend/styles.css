@@ -516,6 +516,20 @@ section.view-panel:focus, .view-panel:focus { outline: none; }
     font-variant-numeric: tabular-nums;
 }
 
+/* Compact stored knockout result (aggregate or single match). */
+.mini-result {
+    font-size: .85em;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+}
+
+.mini-result .aggregate-label {
+    color: var(--accent-2);
+    margin-right: 4px;
+}
+
 /* ── Crests & initials (shared) ───────────────────────────────────────── */
 .crest-initials,
 .crest-placeholder {
