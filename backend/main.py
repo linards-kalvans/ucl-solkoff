@@ -439,7 +439,10 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                 COALESCE(s2.played, 0) as opponent_played,
                 m.home_score,
                 m.away_score,
-                m.date
+                m.date,
+                s2.won as opponent_won,
+                s2.drawn as opponent_drawn,
+                s2.lost as opponent_lost
             FROM matches m
             JOIN teams t2 ON m.away_team_id = t2.id
             LEFT JOIN standings s2 ON m.away_team_id = s2.team_id
@@ -459,7 +462,10 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                 COALESCE(s2.played, 0) as opponent_played,
                 m.home_score,
                 m.away_score,
-                m.date
+                m.date,
+                s2.won as opponent_won,
+                s2.drawn as opponent_drawn,
+                s2.lost as opponent_lost
             FROM matches m
             JOIN teams t2 ON m.home_team_id = t2.id
             LEFT JOIN standings s2 ON m.home_team_id = s2.team_id
@@ -480,6 +486,9 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
             home_score = row[5]
             away_score = row[6]
             match_date = row[7]
+            opp_won = row[8]
+            opp_draw = row[9]
+            opp_lost = row[10]
             
             # Home match: team is home
             team_score = home_score
@@ -503,6 +512,9 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                     'points': opp_points,
                     'played': opp_played,
                     'pointsPerGame': (opp_points / opp_played) if opp_played > 0 else 0.0,
+                    'won': opp_won,
+                    'draw': opp_draw,
+                    'lost': opp_lost,
                     'matchesPlayed': 0,
                     'matches': []
                 }
@@ -526,6 +538,9 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
             home_score = row[5]
             away_score = row[6]
             match_date = row[7]
+            opp_won = row[8]
+            opp_draw = row[9]
+            opp_lost = row[10]
             
             # Away match: team is away
             team_score = away_score
@@ -549,6 +564,9 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                     'points': opp_points,
                     'played': opp_played,
                     'pointsPerGame': (opp_points / opp_played) if opp_played > 0 else 0.0,
+                    'won': opp_won,
+                    'draw': opp_draw,
+                    'lost': opp_lost,
                     'matchesPlayed': 0,
                     'matches': []
                 }

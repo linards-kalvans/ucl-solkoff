@@ -1128,13 +1128,18 @@ async function loadSolkoffDetails(teamId, detailCell) {
 }
 
 function renderDetailContent(detailCell, details) {
+    const scorePerspective = `Scores shown from ${details.teamName}'s perspective`;
     const opponentsList = details.opponents.map(opp => {
         const logoHtml = crestHtml(opp.teamCrest, opp.teamName, opp.teamCode);
         
-        // Calculate match outcomes summary
-        const wins = opp.matches ? opp.matches.filter(m => m.outcome === 'win').length : 0;
-        const draws = opp.matches ? opp.matches.filter(m => m.outcome === 'draw').length : 0;
-        const losses = opp.matches ? opp.matches.filter(m => m.outcome === 'loss').length : 0;
+        // Season W/D/L comes from the opponent's own standings row, not the
+        // head-to-head matches below. A missing count is unavailable, never a
+        // fabricated zero; real zeroes still render.
+        const seasonRecordPresent = [opp.won, opp.draw, opp.lost]
+            .every(value => value !== null && value !== undefined);
+        const seasonRecord = seasonRecordPresent
+            ? `${opp.won}W ${opp.draw}D ${opp.lost}L`
+            : 'unavailable';
         
         // Format match results
         const matchResults = opp.matches && opp.matches.length > 0
@@ -1155,13 +1160,13 @@ function renderDetailContent(detailCell, details) {
                 ${logoHtml}
                 <div class="opponent-main-info">
                     <span class="opponent-name">${escapeHtml(opp.teamName)}</span>
-                    <span class="opponent-stats">${wins}W ${draws}D ${losses}L</span>
+                    <span class="opponent-stats">Season: ${seasonRecord}</span>
                 </div>
                 <div class="opponent-matches-info">
-                    <div class="match-results">${matchResults}</div>
+                    <div class="match-results" title="${escapeHtml(scorePerspective)}">${matchResults}</div>
                     <div class="opponent-meta">
                         <span class="opponent-points">${opp.pointsPerGame ? opp.pointsPerGame.toFixed(3) : '0.000'} PPG</span>
-                        <span class="opponent-matches">${opp.matchesPlayed} match${opp.matchesPlayed !== 1 ? 'es' : ''}</span>
+                        <span class="opponent-matches">${opp.matchesPlayed} H2H match${opp.matchesPlayed !== 1 ? 'es' : ''}</span>
                     </div>
                 </div>
             </div>
