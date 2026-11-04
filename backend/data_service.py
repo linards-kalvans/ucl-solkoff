@@ -7,9 +7,54 @@ from backend.api_client import APIClient
 from backend.github_data_fetcher import GitHubDataFetcher
 from backend.football_txt_parser import FootballTxtParser
 from backend.team_matcher import TeamMatcher
+from backend.team_identity import TeamRedirectResolver
 from backend.fixture_ids import deterministic_match_id, effective_matchday
+from backend.competitions import (
+    CONFERENCE_INCEPTION_YEAR,
+    FIRST_LEAGUE_PHASE_YEAR,
+    PROVIDER_ESPN,
+    competitions_metadata,
+    provider_for,
+    supported_codes,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def missing_history_competitions(db) -> List[str]:
+    """Competitions/seasons whose historical rows are missing.
+
+    ESPN competitions (EL/UCL) are checked across their supported 2024/25+
+    windows (Conference only from its inception), never by a pre-2024 count.
+    CL keeps its existing pre-2024 presence heuristic.
+    """
+    from backend.season_service import current_season_year, season_bounds
+
+    current = current_season_year()
+    missing: List[str] = []
+    for code in supported_codes():
+        if provider_for(code) == PROVIDER_ESPN:
+            start = FIRST_LEAGUE_PHASE_YEAR
+            if code == "UCL":
+                start = max(start, CONFERENCE_INCEPTION_YEAR)
+            for year in range(start, current + 1):
+                start_iso, end_iso = season_bounds(year)
+                row = db.fetchone(
+                    'SELECT COUNT(*) FROM matches WHERE competition_id = ? '
+                    'AND "date" >= ? AND "date" < ?',
+                    (code, start_iso, end_iso),
+                )
+                if (row[0] if row else 0) == 0:
+                    missing.append(f"{code} {year}")
+        else:
+            row = db.fetchone(
+                'SELECT COUNT(*) FROM matches WHERE competition_id = ? '
+                'AND "date" < \'2024-01-01\'',
+                (code,),
+            )
+            if (row[0] if row else 0) < 100:
+                missing.append(code)
+    return missing
 
 
 class DataService:
@@ -27,6 +72,79 @@ class DataService:
         self.github_fetcher = GitHubDataFetcher(cache_dir="./data/github_cache")
         self.txt_parser = FootballTxtParser()
         self.team_matcher = TeamMatcher(db)
+        # Lazily constructed so CL callers/mocks that never touch EL/UCL have no
+        # ESPN side effects (no network client, no mapping-table writes).
+        self._espn_service = None
+
+    def _espn(self):
+        """Lazy ESPN ingestion service for EL/UCL."""
+        if self._espn_service is None:
+            from backend.espn_service import ESPNDataService
+            self._espn_service = ESPNDataService(self.db)
+        return self._espn_service
+
+    def _resolver(self) -> TeamRedirectResolver:
+        """Retired-team redirect resolver for this database.
+
+        Every football-data writer canonicalizes incoming provider team ids
+        through this helper so a later CL payload carrying a reviewed retired
+        provider id can never overwrite or reactivate the retained retired row.
+        """
+        return TeamRedirectResolver(self.db)
+
+    def _upsert_team_row(self, team_id, name, code, crest, resolver) -> bool:
+        """Write a provider team row, resolving to its reviewed active root.
+
+        Returns ``False`` when the incoming id is unusable. When a redirect is
+        applied the retired row is never touched: the root is updated in place,
+        filling only its missing metadata so established name/code/crest survive.
+        Without a redirect the historical overwrite semantics are preserved.
+        """
+        canonical = resolver.canonical_id(team_id)
+        if canonical is None:
+            return False
+        if canonical != team_id:
+            row = self.db.fetchone(
+                "SELECT name, code, crest FROM teams WHERE id = ?", (canonical,)
+            )
+            if row is None:
+                self.db.execute(
+                    "INSERT INTO teams (id, name, code, crest) VALUES (?, ?, ?, ?)",
+                    (canonical, name, code, crest),
+                )
+                return True
+            updates = {}
+            if not row[0] and name:
+                updates["name"] = name
+            if not row[1] and code:
+                updates["code"] = code
+            if not row[2] and crest:
+                updates["crest"] = crest
+            if updates:
+                assignments = ", ".join(f"{col} = ?" for col in updates)
+                self.db.execute(
+                    f"UPDATE teams SET {assignments} WHERE id = ?",
+                    tuple(updates.values()) + (canonical,),
+                )
+            return True
+        self.db.execute("""
+            INSERT INTO teams (id, name, code, crest)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                name = excluded.name,
+                code = excluded.code,
+                crest = excluded.crest
+        """, (team_id, name, code, crest))
+        return True
+
+    def _football_data_client(self):
+        """The football-data client, raising loudly when unconfigured."""
+        if self.api_client is None:
+            raise RuntimeError(
+                "football-data client unavailable (EXTERNAL_API_KEY not configured); "
+                "CL refresh is disabled"
+            )
+        return self.api_client
     
     def sync_teams(self, competition_id: str = "CL"):
         """Sync teams from API to database.
@@ -34,7 +152,8 @@ class DataService:
         Args:
             competition_id: Competition ID
         """
-        standings_data = self.api_client.get_competition_standings(competition_id)
+        api = self._football_data_client()
+        standings_data = api.get_competition_standings(competition_id)
         
         # Extract teams from standings
         teams = set()
@@ -53,7 +172,7 @@ class DataService:
                         ))
         
         # Also get teams from matches
-        matches_data = self.api_client.get_competition_matches(competition_id)
+        matches_data = api.get_competition_matches(competition_id)
         if "matches" in matches_data:
             for match in matches_data["matches"]:
                 home_team = match.get("homeTeam", {})
@@ -79,22 +198,20 @@ class DataService:
         # Insert or update teams
         teams_inserted = 0
         teams_skipped = 0
-        
+        # Built only when there is work so an empty sync on a source without an
+        # identity resolver does not raise needlessly.
+        resolver = self._resolver() if teams else None
+
         for team_id, name, code, crest in teams:
             if not team_id:
                 teams_skipped += 1
                 continue
-            
+
             try:
-                self.db.execute("""
-                    INSERT INTO teams (id, name, code, crest)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        name = excluded.name,
-                        code = excluded.code,
-                        crest = excluded.crest
-                """, (team_id, name, code, crest))
-                teams_inserted += 1
+                if self._upsert_team_row(team_id, name, code, crest, resolver):
+                    teams_inserted += 1
+                else:
+                    teams_skipped += 1
             except Exception as e:
                 logger.warning(f"Skipping team {team_id}: {e}")
                 teams_skipped += 1
@@ -108,24 +225,28 @@ class DataService:
         Args:
             competition_id: Competition ID
         """
-        matches_data = self.api_client.get_competition_matches(competition_id)
+        api = self._football_data_client()
+        matches_data = api.get_competition_matches(competition_id)
         
         if "matches" not in matches_data:
             return
         
+        match_list = matches_data["matches"]
         matches_inserted = 0
         matches_skipped = 0
-        
-        for match in matches_data["matches"]:
+        resolver = self._resolver() if match_list else None
+
+        for match in match_list:
             match_id = match.get("id")
             home_team = match.get("homeTeam", {})
             away_team = match.get("awayTeam", {})
             score = match.get("score", {})
             full_time = score.get("fullTime", {})
             
-            # Validate required fields
-            home_team_id = home_team.get("id")
-            away_team_id = away_team.get("id")
+            # Validate required fields; canonicalize so match references point at
+            # a reviewed active root, never a retired provider id.
+            home_team_id = resolver.canonical_id(home_team.get("id"))
+            away_team_id = resolver.canonical_id(away_team.get("id"))
             
             # Skip matches with missing team IDs
             if not match_id or not home_team_id or not away_team_id:
@@ -190,7 +311,8 @@ class DataService:
         Args:
             competition_id: Competition ID
         """
-        standings_data = self.api_client.get_competition_standings(competition_id)
+        api = self._football_data_client()
+        standings_data = api.get_competition_standings(competition_id)
         
         if "standings" not in standings_data:
             return
@@ -198,6 +320,11 @@ class DataService:
         now = datetime.utcnow().isoformat()
         standings_inserted = 0
         standings_skipped = 0
+        has_entries = any(
+            isinstance(group, dict) and group.get("table")
+            for group in standings_data["standings"]
+        )
+        resolver = self._resolver() if has_entries else None
         
         for group in standings_data["standings"]:
             if "table" not in group:
@@ -205,7 +332,8 @@ class DataService:
             
             for entry in group["table"]:
                 team = entry.get("team", {})
-                team_id = team.get("id")
+                # Canonicalize so standings reference the reviewed active root.
+                team_id = resolver.canonical_id(team.get("id"))
                 
                 if not team_id:
                     standings_skipped += 1
@@ -214,11 +342,11 @@ class DataService:
                 try:
                     self.db.execute("""
                         INSERT INTO standings (
-                            team_id, position, played, won, drawn, lost,
+                            competition_id, team_id, position, played, won, drawn, lost,
                             goals_for, goals_against, goal_difference, points, last_updated
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT (team_id) DO UPDATE SET
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT (competition_id, team_id) DO UPDATE SET
                                 position = excluded.position,
                                 played = excluded.played,
                                 won = excluded.won,
@@ -230,6 +358,7 @@ class DataService:
                                 points = excluded.points,
                                 last_updated = excluded.last_updated
                     """, (
+                        competition_id,
                         team_id,
                         entry.get("position"),
                         entry.get("playedGames", 0),
@@ -268,13 +397,10 @@ class DataService:
         current_year = datetime.now().year
         current_season_start = current_year if datetime.now().month >= 8 else current_year - 1
         
-        # European competition IDs
-        # Note: Conference League code is "UCL" in football-data.org API (not "EC")
-        competitions = {
-            "CL": "Champions League",
-            "EL": "Europa League",
-            "UCL": "Conference League"
-        }
+        # European competition codes come from the shared registry. ``UCL`` is
+        # the provider code for the Conference League (not ``EC``, which is the
+        # European Championship).
+        competitions = {c["code"]: c["label"] for c in competitions_metadata()}
         
         logger.info(f"Starting historical data sync for {years_back} years")
         
@@ -325,18 +451,41 @@ class DataService:
             for idx, (comp_id, comp_name, season_year, is_current) in enumerate(seasons_to_fetch):
                 try:
                     logger.info(f"Fetching {comp_name} season {season_year}/{season_year+1} ({'current' if is_current else 'historical'})")
-                    
-                    if is_current:
+
+                    # Conference League did not exist before its inception.
+                    if comp_id == "UCL" and season_year < CONFERENCE_INCEPTION_YEAR:
+                        logger.info(
+                            f"Skipping {comp_name} season {season_year}/{season_year+1}: "
+                            "before competition inception"
+                        )
+                        continue
+
+                    # ESPN-backed competitions use ESPN for 2024/25 onward;
+                    # older archive seasons keep their existing source path.
+                    if provider_for(comp_id) == PROVIDER_ESPN and season_year >= FIRST_LEAGUE_PHASE_YEAR:
+                        self._espn().sync_season(comp_id, season_year)
+                    elif is_current:
                         # Use football-data.org API for current season
                         if idx > 0:
                             time.sleep(delay_between_requests)
                         self._sync_season_from_api(comp_id, comp_name, season_year)
                     else:
-                        # Use GitHub for historical seasons
-                        if not github_cloned:
-                            logger.warning(f"Skipping {comp_name} season {season_year}/{season_year+1} - GitHub repo not available")
-                            continue
-                        self._sync_season_from_github(comp_id, comp_name, season_year)
+                        # Prefer the exact, header-confirmed GitHub source for
+                        # historical seasons. When it is absent, fall back to a
+                        # bounded API-season request (existing rate limiting)
+                        # rather than importing another competition's file.
+                        found = False
+                        if github_cloned:
+                            found = self._sync_season_from_github(comp_id, comp_name, season_year)
+                        else:
+                            logger.warning(
+                                f"GitHub repo unavailable for {comp_name} season "
+                                f"{season_year}/{season_year+1} — trying API fallback"
+                            )
+                        if not found:
+                            if idx > 0:
+                                time.sleep(delay_between_requests)
+                            self._sync_season_from_api(comp_id, comp_name, season_year)
                         
                 except Exception as e:
                     error_msg = str(e)
@@ -365,22 +514,27 @@ class DataService:
             comp_name: Competition name
             season_year: Season start year
         """
-        matches_data = self.api_client.get_competition_matches_by_season(comp_id, season_year)
+        api = self._football_data_client()
+        matches_data = api.get_competition_matches_by_season(comp_id, season_year)
         
         if "matches" not in matches_data:
             logger.debug(f"No matches found for {comp_name} season {season_year}/{season_year+1}")
             return
         
+        match_list = matches_data["matches"]
         matches_inserted = 0
         matches_skipped = 0
+        resolver = self._resolver() if match_list else None
         
-        for match in matches_data["matches"]:
+        for match in match_list:
             match_id = match.get("id")
             home_team = match.get("homeTeam", {})
             away_team = match.get("awayTeam", {})
             
-            home_team_id = home_team.get("id")
-            away_team_id = away_team.get("id")
+            # Canonicalize provider ids before any write so a retired identity
+            # cannot be recreated/overwritten by an archived API payload.
+            home_team_id = resolver.canonical_id(home_team.get("id"))
+            away_team_id = resolver.canonical_id(away_team.get("id"))
             
             if not match_id or not home_team_id or not away_team_id:
                 matches_skipped += 1
@@ -392,32 +546,14 @@ class DataService:
                 home_code = home_team.get("tla") or home_team.get("shortName")
                 away_code = away_team.get("tla") or away_team.get("shortName")
                 
-                self.db.execute("""
-                    INSERT INTO teams (id, name, code, crest)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        name = excluded.name,
-                        code = excluded.code,
-                        crest = excluded.crest
-                """, (
-                    home_team_id,
-                    home_team.get("name"),
-                    home_code,
-                    home_team.get("crest")
-                ))
-                self.db.execute("""
-                    INSERT INTO teams (id, name, code, crest)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        name = excluded.name,
-                        code = excluded.code,
-                        crest = excluded.crest
-                """, (
-                    away_team_id,
-                    away_team.get("name"),
-                    away_code,
-                    away_team.get("crest")
-                ))
+                self._upsert_team_row(
+                    home_team_id, home_team.get("name"), home_code,
+                    home_team.get("crest"), resolver,
+                )
+                self._upsert_team_row(
+                    away_team_id, away_team.get("name"), away_code,
+                    away_team.get("crest"), resolver,
+                )
             except Exception as e:
                 logger.debug(f"Error storing teams for match {match_id}: {e}")
             
@@ -473,9 +609,15 @@ class DataService:
         self.db.commit()
         logger.info(f"Synced {matches_inserted} matches for {comp_name} season {season_year}/{season_year+1} from API (skipped {matches_skipped})")
     
-    def _sync_season_from_github(self, comp_id: str, comp_name: str, season_year: int):
+    def _sync_season_from_github(self, comp_id: str, comp_name: str, season_year: int) -> bool:
         """Sync a season from GitHub openfootball repository.
-        
+
+        Returns ``True`` only when an exact, header-confirmed source for
+        ``comp_id`` was imported (matches written). Returns ``False`` when no
+        verified source exists or nothing could be parsed, so the caller may
+        attempt a bounded API fallback. A different competition's file is never
+        imported here.
+
         Args:
             comp_id: Competition ID
             comp_name: Competition name
@@ -488,14 +630,23 @@ class DataService:
         content = self.github_fetcher.fetch_season_file(season_str, comp_id)
         if not content:
             logger.warning(f"Could not fetch {comp_name} season {season_str} from GitHub")
-            return
+            return False
         
         # Parse the content
         parsed_data = self.txt_parser.parse(content, competition=comp_id, season=season_str)
         
         if not parsed_data or not parsed_data.get("matches"):
             logger.warning(f"No matches parsed from {comp_name} season {season_str}")
-            return
+            return False
+
+        # Refuse a source whose own header identifies a different competition.
+        parsed_competition = parsed_data.get("competition")
+        if parsed_competition and parsed_competition != comp_id:
+            logger.warning(
+                f"Refusing {comp_name} season {season_str}: source header "
+                f"identifies {parsed_competition}"
+            )
+            return False
         
         matches_inserted = 0
         matches_skipped = 0
@@ -623,13 +774,28 @@ class DataService:
         
         self.db.commit()
         logger.info(f"Synced {matches_inserted} matches and {teams_inserted} teams for {comp_name} season {season_str} from GitHub (skipped {matches_skipped})")
+        if matches_inserted == 0:
+            logger.warning(
+                f"No matches stored for {comp_name} season {season_str} from "
+                "GitHub — reporting failure so the bounded API fallback runs"
+            )
+            return False
+        return True
     
     def sync_all(self, competition_id: str = "CL"):
         """Sync all data (teams, matches, standings).
-        
+
+        EL/UCL delegate to the ESPN ingestion service; CL keeps the existing
+        football-data path. Routing is by explicit competition provider, never a
+        failure-triggered fallback.
+
         Args:
             competition_id: Competition ID
         """
+        if provider_for(competition_id) == PROVIDER_ESPN:
+            self._espn().sync_all(competition_id)
+            return
+        self._football_data_client()
         self.sync_teams(competition_id)
         self.sync_matches(competition_id)
         # Also try to fetch knockout stage matches if available
@@ -644,6 +810,7 @@ class DataService:
         Args:
             competition_id: Competition ID
         """
+        api = self._football_data_client()
         # Try different stage filters to get knockout matches
         stages_to_try = [
             "KNOCKOUT_OUT",
@@ -654,21 +821,23 @@ class DataService:
         for stage in stages_to_try:
             try:
                 if stage:
-                    matches_data = self.api_client.get_competition_matches_by_stage(competition_id, stage)
+                    matches_data = api.get_competition_matches_by_stage(competition_id, stage)
                 else:
-                    matches_data = self.api_client.get_competition_matches(competition_id)
+                    matches_data = api.get_competition_matches(competition_id)
                 
                 if "matches" not in matches_data:
                     continue
                 
+                match_list = matches_data["matches"]
+                resolver = self._resolver() if match_list else None
                 matches_inserted = 0
-                for match in matches_data["matches"]:
+                for match in match_list:
                     match_id = match.get("id")
                     home_team = match.get("homeTeam", {})
                     away_team = match.get("awayTeam", {})
                     
-                    home_team_id = home_team.get("id")
-                    away_team_id = away_team.get("id")
+                    home_team_id = resolver.canonical_id(home_team.get("id"))
+                    away_team_id = resolver.canonical_id(away_team.get("id"))
                     
                     if not match_id or not home_team_id or not away_team_id:
                         continue
@@ -697,9 +866,9 @@ class DataService:
                         self.db.execute("""
                             INSERT INTO matches (
                                 id, home_team_id, away_team_id, home_score, away_score,
-                                matchday, date, status, stage, round, group_name
+                                matchday, date, status, stage, round, group_name, competition_id
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT (id) DO UPDATE SET
                                 home_score = excluded.home_score,
                                 away_score = excluded.away_score,
@@ -708,7 +877,8 @@ class DataService:
                                 round = excluded.round,
                                 group_name = excluded.group_name,
                                 matchday = excluded.matchday,
-                                date = excluded.date
+                                date = excluded.date,
+                                competition_id = excluded.competition_id
                         """, (
                             match_id,
                             home_team_id,
@@ -720,7 +890,8 @@ class DataService:
                             match.get("status"),
                             match_stage,
                             round_name,
-                            group_name
+                            group_name,
+                            competition_id
                         ))
                         matches_inserted += 1
                     except Exception as e:

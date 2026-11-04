@@ -38,6 +38,10 @@ class EloCalculator:
 
     def calculate_all(self):
         """Replay all finished matches chronologically and store resulting Elo ratings."""
+        # ``date, id`` gives a total order: legacy archive rows can carry the
+        # same (approximate) date, and an unstable tie order would make a
+        # candidate rebuild non-deterministic. The id tie-break is fixed so two
+        # replays of identical retained data produce identical ratings.
         matches = self.db.fetchall("""
             SELECT home_team_id, away_team_id, home_score, away_score
             FROM matches
@@ -46,7 +50,7 @@ class EloCalculator:
               AND away_score IS NOT NULL
               AND date IS NOT NULL
               AND competition_id IN (?, ?, ?)
-            ORDER BY date ASC
+            ORDER BY date ASC, id ASC
         """, VALID_COMPETITIONS)
 
         ratings: Dict[int, float] = {}

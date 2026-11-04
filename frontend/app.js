@@ -10,6 +10,14 @@ let selectedSeason = null; // season start year; null until resolved (backend de
 let currentSeason = null;  // resolved current season, for historical-date display
 let seasonGen = 0;
 
+// Competition selection: metadata comes from /api/competitions. `competitionGen`
+// drops metadata/seasons responses that belong to a competition the user has
+// already switched away from, so a late response can never restore an old choice.
+let competitions = [];
+let defaultCompetition = null;
+let selectedCompetition = null;
+let competitionGen = 0;
+
 let standingsData = [];
 // Multi-column sort: array of {column, direction} objects
 // Default: Strength only
@@ -111,28 +119,21 @@ function leaguePositionTitle() {
         const season = seasons.find(s => s.year === selectedSeason);
         return `Position in the ${season ? season.label : selectedSeason} league table`;
     }
-    return 'Position in current UCL league table';
+    const label = competitionLabel() || 'competition';
+    return `Position in current ${label} league table`;
 }
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('DOM loaded, initializing...');
 
-    // Resolve selectable seasons first so every season-dependent GET below and
-    // later carries the selected year. Falls back to backend default when the
-    // endpoint is unavailable.
-    await fetchSeasons();
-
-    // Initialize primary view navigation
+    // View navigation and routing run synchronously so the primary nav reflects
+    // the URL immediately. Any data load they trigger is deferred until
+    // competition/season metadata has resolved (see metadataReady gate), so
+    // every request carries the selected competition.
     initializePrimaryNav();
-
-    // Initialize stage tabs
     initializeTabs();
-
-    // Knockout analysis sidebar: close button + scoped arrow/Escape keys
     initializeKnockoutSidebar();
-
-    // Overview first paint: explicit loading states until data arrives
     renderOverview();
 
     // Resolve the initial route from the URL hash
@@ -145,6 +146,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         activateTab(route.stage, { updateHash: false });
     } else {
         activateView(route.view, { updateHash: false });
+    }
+
+    // Resolve competition metadata first, then selectable seasons, so every
+    // season-dependent GET below and later carries the selected competition.
+    await fetchCompetitions();
+    await fetchSeasons();
+    metadataReady = true;
+    if (pendingTabLoad) {
+        const tabId = pendingTabLoad;
+        pendingTabLoad = null;
+        loadTabContent(tabId);
     }
     // Raw standings feed Overview metrics/rankings and are reused by League.
     ensureStandingsLoaded();
@@ -170,6 +182,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         seasonSelect.addEventListener('change', () => {
             const year = parseInt(seasonSelect.value, 10);
             if (Number.isInteger(year)) switchSeason(year);
+        });
+    }
+
+    // Competition switcher
+    const competitionSelect = document.getElementById('competitionSelect');
+    if (competitionSelect) {
+        competitionSelect.addEventListener('change', () => {
+            const code = competitionSelect.value;
+            if (code) switchCompetition(code);
         });
     }
     
@@ -245,6 +266,8 @@ const IGNORED_ANCHOR_HASHES = ['main-content'];
 let currentRoute = { view: 'overview', stage: null };
 let explicitStageChosen = false;   // true after a stage hash or a user stage click
 let standingsRequested = false;    // avoid duplicate league loads from routing
+let metadataReady = false;         // competition + season metadata resolved
+let pendingTabLoad = null;         // knockout stage load deferred until metadataReady
 let initialKnockoutStage = DEFAULT_KNOCKOUT_STAGE; // resolved from the stage API
 
 function resolveRoute(hash) {
@@ -373,19 +396,76 @@ function initializeTabs() {
 }
 
 // ---------------------------------------------------------------------------
-// Season selection
+// Competition + season selection
 // ---------------------------------------------------------------------------
-function seasonQuery() {
-    return selectedSeason != null ? `?season=${selectedSeason}` : '';
+// Every data GET carries the selected competition (and season when known).
+function dataQuery() {
+    const params = [];
+    if (selectedSeason != null) params.push(`season=${selectedSeason}`);
+    if (selectedCompetition != null) params.push(`competition=${encodeURIComponent(selectedCompetition)}`);
+    return params.length ? `?${params.join('&')}` : '';
 }
 
-async function fetchSeasons(attempt = 1) {
+function competitionLabel(code = selectedCompetition) {
+    const found = competitions.find(c => c.code === code);
+    return found ? (found.label || found.code) : (code || '');
+}
+
+async function fetchCompetitions(attempt = 1) {
+    const gen = competitionGen;
     try {
-        const response = await fetch(`${API_BASE_URL}/api/seasons`);
+        const response = await fetch(`${API_BASE_URL}/api/competitions`);
+        if (gen !== competitionGen) return; // a switch superseded this discovery
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
+        if (gen !== competitionGen) return;
+        const list = data && Array.isArray(data.competitions)
+            ? data.competitions.filter(c => c && c.code)
+            : [];
+        if (list.length === 0) {
+            return; // keep the default (no competition param) behaviour
+        }
+        competitions = list;
+        const declared = data && data.default;
+        defaultCompetition = list.some(c => c.code === declared) ? declared : list[0].code;
+        selectedCompetition = defaultCompetition;
+        renderCompetitionOptions();
+    } catch (error) {
+        if (gen !== competitionGen) return;
+        console.error('Error loading competitions:', error);
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            return fetchCompetitions(attempt + 1);
+        }
+    }
+}
+
+function renderCompetitionOptions() {
+    const select = document.getElementById('competitionSelect');
+    if (!select) return;
+    select.innerHTML = competitions.map(competition =>
+        `<option value="${escapeHtml(competition.code)}">${escapeHtml(competition.label || competition.code)}</option>`
+    ).join('');
+    if (selectedCompetition != null) select.value = selectedCompetition;
+    // A single competition needs no switcher; disable to keep the control honest.
+    select.disabled = competitions.length <= 1;
+}
+
+async function fetchSeasons(attempt = 1) {
+    const gen = competitionGen;
+    const query = selectedCompetition != null
+        ? `?competition=${encodeURIComponent(selectedCompetition)}`
+        : '';
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/seasons${query}`);
+        if (gen !== competitionGen) return; // competition switched mid-flight
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        if (gen !== competitionGen) return;
         const list = data && Array.isArray(data.seasons) ? data.seasons : [];
         const current = data && Number.isInteger(data.currentSeason) ? data.currentSeason : null;
         if (list.length > 0) {
@@ -400,9 +480,12 @@ async function fetchSeasons(attempt = 1) {
         } else {
             return; // nothing usable: keep the default (no season param) behaviour
         }
+        // A valid season must be chosen for the new competition: the resolved
+        // current season wins, so a stale year from another competition is gone.
         selectedSeason = currentSeason;
         renderSeasonOptions();
     } catch (error) {
+        if (gen !== competitionGen) return;
         console.error('Error loading seasons:', error);
         if (attempt < 2) {
             await new Promise(resolve => setTimeout(resolve, 400));
@@ -429,6 +512,12 @@ async function switchSeason(year) {
     if (year === selectedSeason) return;
     selectedSeason = year;
     const sgen = ++seasonGen;
+    // Invalidate any in-flight standings/knockout load for the previous season
+    // immediately, before the stage wait below. A delayed old-season payload
+    // must never repaint over the new selection.
+    standingsGen++;
+    pairsGen++;
+    knockoutLoadGen++;
 
     solkoffDetailsCache = {};
     playoffAnalysisCache = {};
@@ -461,11 +550,66 @@ async function switchSeason(year) {
     loadOverviewKnockout();
 }
 
+// Switching competition clears every competition-dependent payload and reloads
+// all views. competitionGen invalidates late metadata/season responses; seasonGen
+// invalidates late standings/details/pairs responses, so an out-of-order reply
+// can never restore the previous competition's data.
+async function switchCompetition(code) {
+    if (code === selectedCompetition) return;
+    selectedCompetition = code;
+    const cgen = ++competitionGen;
+    const sgen = ++seasonGen;
+    // Invalidate any in-flight standings/pairs load so a late response for the
+    // previous competition can never paint over the new selection.
+    standingsGen++;
+    pairsGen++;
+    knockoutLoadGen++;
+
+    solkoffDetailsCache = {};
+    playoffAnalysisCache = {};
+    pairsByStage = {};
+    currentPairsList = [];
+    currentPairIndex = -1;
+    expandedTeamId = null;
+    standingsData = [];
+    standingsState = 'loading';
+    overviewPairs = null;
+    pairsState = 'loading';
+    seasons = [];
+    selectedSeason = null; // resolved again for the new competition below
+    // Clear and disable the season switcher immediately: the previous
+    // competition's years must never remain selectable while discovery is
+    // pending, nor linger as stale options if that discovery fails.
+    renderSeasonOptions();
+    standingsRequested = true; // the reload below *is* the league load
+    closeActiveAnalysis({ invalidate: true, focusCard: false });
+
+    const tableBody = document.getElementById('standingsBody');
+    if (tableBody) tableBody.innerHTML = renderSkeletonRows(10);
+    renderOverview();
+
+    // Resolve the new competition's seasons (and a valid default season for it).
+    await fetchSeasons();
+    if (cgen !== competitionGen) return;
+
+    // Re-resolve the new competition's stage before reloading the views.
+    const stageBefore = currentRoute.stage;
+    await loadCurrentStage();
+    if (cgen !== competitionGen || sgen !== seasonGen) return;
+
+    // A retained explicit stage still needs its pairs reloaded for the competition.
+    if (currentRoute.view === 'knockout' && currentRoute.stage === stageBefore) {
+        loadTabContent(currentRoute.stage);
+    }
+    loadStandings();
+    loadOverviewKnockout();
+}
+
 async function loadCurrentStage() {
     const sgen = seasonGen;
     let stage = null;
     try {
-        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage${seasonQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage${dataQuery()}`);
         if (sgen !== seasonGen) return; // season switched mid-flight
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -541,6 +685,11 @@ function activateTab(tabId, { updateHash = true, userChose = false } = {}) {
 }
 
 function loadTabContent(tabId) {
+    if (!metadataReady) {
+        // Defer until competition/season metadata resolves so the request is scoped.
+        pendingTabLoad = tabId;
+        return;
+    }
     if (tabId === 'league') {
         loadStandings();
     } else {
@@ -560,7 +709,7 @@ let knockoutLoadGen = 0;
 
 function fetchKnockoutPairsOnce(stage) {
     if (!pairsByStage[stage]) {
-        const promise = fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}${seasonQuery()}`)
+        const promise = fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}${dataQuery()}`)
             .then(response => {
                 if (response.status === 404 || response.status === 400) {
                     const err = new Error(`No data available for ${stage}`);
@@ -896,8 +1045,8 @@ async function loadStandings() {
     tableBody.innerHTML = renderSkeletonRows(10);
 
     try {
-        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings${seasonQuery()}`);
-        const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
+        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings${dataQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/standings${dataQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -1105,7 +1254,7 @@ function createDetailRow(teamId) {
 async function loadSolkoffDetails(teamId, detailCell) {
     const sgen = seasonGen;
     try {
-        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details${seasonQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details${dataQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -1368,7 +1517,7 @@ async function showPlayoffAnalysis(team1Id, team2Id, sourceCard) {
     content.innerHTML = '<div class="loading">Loading analysis...</div>';
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis${seasonQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis${dataQuery()}`);
         if (gen !== analysisRequestGen) return; // selection/stage changed: drop late response
         
         if (!response.ok) {
@@ -1493,7 +1642,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id, gen) {
         // standingsData not loaded yet, try to load it
         console.log('standingsData not available, attempting to load...');
         try {
-            const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
+            const response = await fetch(`${API_BASE_URL}/api/standings${dataQuery()}`);
             if (response.ok) {
                 const loadedStandings = await response.json();
                 const team1MainStanding = loadedStandings.find(t => {
@@ -1734,7 +1883,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id, gen) {
                 </div>
 
                 <p class="elo-methodology-note">
-                    Ratings built by replaying 10 years of UEFA Champions League history chronologically.
+                    Ratings built by replaying 10 years of European competition history (Champions League, Europa League and Conference League) chronologically.
                     Each result updates both teams' ratings: K-factor = 30, goal multiplier = 1 + ln(|goal diff| + 1),
                     home advantage = +75 Elo during training. Win probability is calculated on a neutral ground.
                     Default starting rating: 1500. Minimum 5 matches required for confidence.
@@ -2008,7 +2157,7 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
                     <p><strong>Method: Combined Strength Rating</strong></p>
                     <p>This probability is calculated using two equally weighted components:</p>
                     <ul>
-                        <li><strong>50% - Current UCL Performance:</strong> Strength rating from this year's league table</li>
+                        <li><strong>50% - Current competition performance:</strong> Strength rating from this year's league table</li>
                         <li><strong>50% - Historical Performance:</strong> Strength rating from the historical mini-table</li>
                     </ul>
                     <p><strong>${team1Name}:</strong> Main League: ${team1Main.toFixed(2)}, Historical: ${team1Hist.toFixed(2)}, Combined: ${((team1Main * 0.5) + (team1Hist * 0.5)).toFixed(2)}</p>
@@ -2027,7 +2176,8 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
                 <div class="probability-explanation">
                     <h4>How this probability is calculated:</h4>
                     <p><strong>Method: Goal-Adjusted Elo Rating</strong></p>
-                    <p>Elo ratings are built by replaying 10 years of UEFA Champions League match history.
+                    <p>Elo ratings are built by replaying 10 years of shared European competition history
+                    (Champions League, Europa League and Conference League).
                     Each match updates both teams' ratings based on the result and goal margin
                     (larger wins = bigger rating swing). A home advantage of +75 Elo points is applied during training.</p>
                     <ul>
@@ -2456,6 +2606,7 @@ let pairsState = 'loading'; // loading|ready|empty|error
 let pairsGen = 0;
 
 function ensureStandingsLoaded() {
+    if (!metadataReady) return; // caller will retry once metadata resolves
     if (standingsRequested) return;
     standingsRequested = true;
     loadStandings();

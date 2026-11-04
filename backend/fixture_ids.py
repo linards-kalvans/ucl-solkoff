@@ -29,6 +29,18 @@ def deterministic_match_id(competition_id: str, season: str, home_team_id: int,
     return -(int(digest[:12], 16) % 2_000_000_000 + 1)
 
 
+def provider_match_id(provider: str, external_id) -> int:
+    """Stable negative fixture ID from a provider's native match ID.
+
+    Namespaced by ``provider`` so an ESPN event ID can never collide with a
+    deterministic GitHub-import ID. Always inside the DuckDB ``INTEGER`` range
+    and identical across processes and Python hash seeds (SHA-256).
+    """
+    key = f"provider|{provider}|{external_id}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return -(int(digest[:12], 16) % 2_000_000_000 + 1)
+
+
 def effective_matchday(matchday, stage, round_name):
     """Matchday used for the fixture ID when the parser had no explicit value.
 

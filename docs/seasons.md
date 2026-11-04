@@ -1,18 +1,19 @@
 # Season Switching
 
-The app can switch every view between stored Champions League seasons.
+The app can switch every view between stored seasons for the selected Champions League, Europa League or Conference League competition. See [European competitions](competitions.md) for codes, configuration and data availability.
 
 ## Scope and supported seasons
 
 - Only **new-format** (league-phase / "Swiss") seasons are selectable: **2024/25 onward**.
-  Older-format seasons and other competitions (Europa League, Conference League) are
-  never listed or counted.
+  Older-format seasons and matches from competitions other than the selected one are
+  never listed or counted. Champions League (`CL`) and Europa League (`EL`) have eight
+  league games per club; Conference League (provider code `UCL`) has six.
 - A season is identified by its **start year** (`2024` means `2024/25`). The season
   window is **August 1 inclusive through the following August 1 exclusive** (UTC).
 
 ## API
 
-`GET /api/seasons` returns the selectable seasons, newest first:
+`GET /api/seasons?competition=EL` returns the selected competition's selectable seasons, newest first (illustrative response):
 
 ```json
 {
@@ -24,7 +25,7 @@ The app can switch every view between stored Champions League seasons.
 }
 ```
 
-The current season is always listed, even when it has no stored matches yet.
+The current season is always listed, even when it has no stored matches yet. An archived season is listed when that competition has a stored match within its season window.
 
 These read endpoints accept an optional `season` query parameter (season start year):
 
@@ -35,14 +36,22 @@ These read endpoints accept an optional `season` query parameter (season start y
 - `GET /api/knockout-pairs/{stage}?season=2024`
 - `GET /api/playoff-pairs/{team1}/{team2}/analysis?season=2024`
 
+Every endpoint above also accepts optional `competition`, as does `/api/seasons`.
+Codes are trimmed and case-insensitive: `?competition=el&season=2024` selects
+Europa League 2024/25. Omitting or leaving `competition` blank uses the validated
+`COMPETITION_ID` default (`CL` when unset, blank or unsupported). An explicit
+unsupported request code returns HTTP 400; it never silently selects CL.
+
 Behavior:
 
 - **Omitting `season` preserves the existing contract**: the current season, read from
-  the live stored `standings` table.
+  the selected competition's live snapshot for standings and coefficients.
 - An **unsupported year returns HTTP 400** (supported range is 2024/25 through the
   current season).
 - A **valid season with no stored data returns an empty state** for that season; it
-  never falls back to another season.
+  never falls back to another season or competition. Standings and pair lists return
+  `[]`; team-detail and stage responses retain their endpoint-specific shapes (see
+  [competition API behavior](competitions.md#request-selection-and-empty-data)).
 
 ## Knockout pair results
 
@@ -82,11 +91,12 @@ contract applies to archived seasons too, which keep their true leg dates;
 
 Selecting a season is **read-only**: no database writes, no data collection, no
 re-import. Archived-season standings and Solkoff values are rebuilt on demand from
-stored `FINISHED` matches in `backend/season_service.py`:
+stored `FINISHED` matches filtered by competition and season in `backend/season_service.py`:
 
 - 3/1/0 points, ordered by **points → goal difference → goals for**.
 - **Solkoff** = mean unique-opponent PPG; **Strength** = `(Points % × Solkoff) / 100`.
-- The live `standings` table is never modified.
+- Live `standings` and `solkoff_coefficients` are snapshots keyed by
+  `(competition_id, team_id)`, not season archives; neither is modified by historical reads.
 
 ### Legacy stored data
 
@@ -94,6 +104,10 @@ Matches imported **before** the text parser recognized the new-format headers
 (`backend/football_txt_parser.py`) were stored with **NULL** `stage`/`round`/`group_name`/
 `matchday`. To stay read-only and avoid a re-import, the reconstruction classifies them
 safely:
+
+These stage rules apply only after filtering by known competition provenance.
+Matches whose `competition_id` is NULL are not assigned to any competition by the
+snapshot migration and do not enter these competition-scoped views.
 
 - Explicit `LEAGUE_STAGE` rows are always league phase.
 - A **NULL-tagged** row is treated as league phase only when `stage`, `round`,
@@ -119,8 +133,11 @@ exists. It is not exposed through the API.
 
 The offline repair was applied in production on 2026-10-13 (see
 [Historical archive repair release](releases/2026-10-13-archive-repair.md));
-both archived seasons now contain exactly 36 clubs playing eight league games
-each, with correct knockout stages.
+both repaired CL archived seasons now contain exactly 36 clubs playing eight league games
+each, with correct knockout stages. This repair authorization remains CL-only; it
+does not repair or certify EL/UCL archives. General historical ingestion requires
+competition-specific filenames and confirming headers, with bounded API-season
+fallback when a verified source is unavailable; see [historical sources](competitions.md#historical-sources-and-provider-access).
 
 ## Archived-season limitations
 
@@ -131,10 +148,17 @@ each, with correct knockout stages.
 
 ## Frontend behavior
 
+- A labelled native **Competition** select sits next to **Season**. Metadata from
+  `GET /api/competitions` resolves the configured initial competition before seasons
+  are loaded. All supported competitions remain selectable, including empty ones.
 - A labelled native **Season** select lives in the header controls (keyboard- and
-  mobile-friendly). It is populated from `GET /api/seasons`, with the **current season
+  mobile-friendly). It is populated from `GET /api/seasons?competition=...`, with the **current season
   selected by default**.
-- The selected year is appended to every season-dependent request.
+- The selected competition and year are appended to every season-dependent data request.
+- **Switching competitions** clears competition-dependent caches and open analysis,
+  clears and disables stale season options while loading, discovers the new
+  competition's seasons and selects its current season before reloading views.
+  Generation guards also reject late metadata and season-discovery responses.
 - **Switching seasons** clears prior standings, expanded team details, knockout pair
   caches and any open pair analysis, then reloads all views. Request/generation guards
   ensure a late response for a previous season can never paint over the newly selected
@@ -142,6 +166,7 @@ each, with correct knockout stages.
 - **Reload data** re-reads stored data for the *currently selected* season. It is a
   GET-only reload and is **not** the same as a browser refresh (F5): a full page load
   starts again at the current season. Persisting the chosen season across a full page
-  load is intentionally not implemented.
+  load is intentionally not implemented. A full page load also restores the configured
+  default competition rather than persisting the previous competition selection.
 - Archived-season knockout cards show their real match dates; the live "too old" date
   heuristic does not apply to archives.

@@ -21,6 +21,13 @@ from backend.season_service import (
     discover_seasons,
     is_supported_year,
 )
+from backend.competitions import (
+    competitions_metadata,
+    configured_competition,
+    resolve_competition,
+    supported_codes,
+)
+from backend.data_service import missing_history_competitions
 
 load_dotenv()
 
@@ -44,7 +51,7 @@ async def lifespan(app: FastAPI):
     db_path = os.getenv("DB_PATH", os.path.join(data_dir, "ucl.db"))
     # Ensure data directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    competition_id = os.getenv("COMPETITION_ID", "CL")
+    competition_id = configured_competition()
     
     db = Database(db_path=db_path)
     
@@ -53,7 +60,9 @@ async def lifespan(app: FastAPI):
     api_cache.cleanup_expired()
     
     try:
-        scheduler = DataScheduler(db, competition_id)
+        # Refresh every supported European competition on startup; each refresh
+        # is isolated so one provider failure cannot stop the others.
+        scheduler = DataScheduler(db, competition_id, competitions=supported_codes())
         
         # Start scheduler
         update_interval = int(os.getenv("UPDATE_INTERVAL", "3600"))
@@ -70,18 +79,22 @@ async def lifespan(app: FastAPI):
         # Historical seasons don't change, so this only needs to run once per fresh volume.
         def _maybe_sync_historical():
             try:
-                row = db.fetchone(
-                    "SELECT COUNT(*) FROM matches WHERE competition_id IN ('CL', 'UCL', 'EL') AND date < '2024-01-01'"
-                )
-                historical_count = row[0] if row else 0
-                if historical_count < 100:
+                # Presence is per competition and per supported season: CL rows
+                # must not mask missing EL/UCL history. ESPN competitions are
+                # checked across their 2024/25+ windows (Conference only from its
+                # inception), never by a pre-2024 count alone.
+                missing = missing_history_competitions(db)
+                if missing:
                     years_back = int(os.getenv("HISTORICAL_YEARS", "10"))
-                    logger.info(f"Historical matches missing ({historical_count} found) — starting background sync for {years_back} years")
+                    logger.info(
+                        f"Historical matches missing for {', '.join(missing)} — "
+                        f"starting background sync for {years_back} years"
+                    )
                     scheduler.data_service.sync_historical_matches(years_back=years_back)
                     scheduler.elo_calculator.calculate_all()
                     logger.info("Background historical sync complete — Elo ratings updated")
                 else:
-                    logger.info(f"Historical data already present ({historical_count} matches), skipping sync")
+                    logger.info("Historical data already present for every competition, skipping sync")
             except Exception as e:
                 logger.error(f"Background historical sync failed: {e}", exc_info=True)
 
@@ -174,9 +187,48 @@ async def health():
     return {"status": "healthy", "database": db is not None}
 
 
-def _competition_id() -> str:
-    """Configured competition whose stored data is served."""
-    return os.getenv("COMPETITION_ID", "CL")
+def _resolve_competition(competition: Optional[str]) -> str:
+    """Resolve an optional request competition parameter.
+
+    ``None`` means the configured default (backwards compatible). An explicit
+    unsupported code raises a 400 rather than silently falling back to another
+    competition.
+    """
+    try:
+        return resolve_competition(competition)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported competition {competition!r}. Supported competitions "
+                f"are: {', '.join(supported_codes())}."
+            ),
+        )
+
+
+@app.get("/api/competitions")
+async def get_competitions() -> Dict[str, Any]:
+    """List supported competitions with metadata for the selector.
+
+    ``default`` is the configured COMPETITION_ID (validated). ``hasCurrentData``
+    reflects whether any live standings row exists for that competition, so the
+    UI can show an honest empty state instead of inventing data.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    try:
+        competitions = competitions_metadata()
+        for entry in competitions:
+            row = db.fetchone(
+                "SELECT COUNT(*) FROM standings WHERE competition_id = ?",
+                (entry["code"],),
+            )
+            entry["hasCurrentData"] = bool(row and row[0])
+        return {"default": configured_competition(), "competitions": competitions}
+    except Exception as e:
+        logger.error(f"Error listing competitions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def _resolve_season(season: Optional[int]) -> int:
@@ -200,13 +252,18 @@ def _resolve_season(season: Optional[int]) -> int:
 
 
 @app.get("/api/seasons")
-async def get_seasons() -> Dict[str, Any]:
-    """List selectable new-format Champions League seasons (newest first)."""
+async def get_seasons(competition: Optional[str] = None) -> Dict[str, Any]:
+    """List selectable new-format seasons for a competition (newest first).
+
+    Args:
+        competition: Optional competition code. Omit for the configured default.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    competition_id = _resolve_competition(competition)
+
     try:
-        competition_id = _competition_id()
         return {
             "currentSeason": current_season_year(),
             "seasons": discover_seasons(db, competition_id),
@@ -219,11 +276,15 @@ async def get_seasons() -> Dict[str, Any]:
 
 
 @app.get("/api/standings")
-async def get_standings(season: Optional[int] = None) -> List[Dict[str, Any]]:
+async def get_standings(
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Get standings with Solkoff coefficients.
 
     Args:
         season: Optional season start year. Omit for the current season.
+        competition: Optional competition code. Omit for the configured default.
 
     Returns:
         List of teams with standings and Solkoff coefficients
@@ -231,20 +292,21 @@ async def get_standings(season: Optional[int] = None) -> List[Dict[str, Any]]:
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
 
     # Archived seasons are rebuilt read-only from stored results; the live
     # standings table is never touched.
     if requested != current_season_year():
         try:
-            return build_standings(db, requested, _competition_id())
+            return build_standings(db, requested, competition_id)
         except Exception as e:
             logger.error(f"Error building historical standings: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     try:
-        # Get standings with Solkoff coefficients
-        # Solkoff is now average PPG of opponents, Strength is (points % * solkoff)
+        # Get standings with Solkoff coefficients for this competition only.
+        # Solkoff is average PPG of opponents, Strength is (points % * solkoff).
         results = db.fetchall("""
             SELECT 
                 s.team_id,
@@ -268,9 +330,11 @@ async def get_standings(season: Optional[int] = None) -> List[Dict[str, Any]]:
                 END as strength_score
             FROM standings s
             JOIN teams t ON s.team_id = t.id
-            LEFT JOIN solkoff_coefficients sc ON s.team_id = sc.team_id
+            LEFT JOIN solkoff_coefficients sc
+                ON s.team_id = sc.team_id AND s.competition_id = sc.competition_id
+            WHERE s.competition_id = ?
             ORDER BY s.points DESC, s.goal_difference DESC, s.goals_for DESC
-        """)
+        """, (competition_id,))
         
         standings = []
         for row in results:
@@ -339,11 +403,17 @@ async def refresh_historical_data(years_back: int = 10, delay: float = 3.0):
         from backend.api_client import APIClient
         from backend.api_cache import APICache
         from backend.data_service import DataService
-        
-        # Initialize API client with cache
+
+        # The dispatcher routes EL/UCL to ESPN and needs no football-data
+        # credential; CL/older archive seasons use the client only when it is
+        # configured. A missing key disables CL here instead of failing the call.
         cache_ttl = int(os.getenv("API_CACHE_TTL", "3600"))
         api_cache = APICache(db, default_ttl_seconds=cache_ttl)
-        api_client = APIClient(cache=api_cache, use_cache=True)
+        try:
+            api_client = APIClient(cache=api_cache, use_cache=True)
+        except ValueError:
+            logger.warning("EXTERNAL_API_KEY not configured; CL historical refresh disabled")
+            api_client = None
         data_service = DataService(db, api_client)
         
         logger.info(f"Starting historical data sync for {years_back} years with {delay}s delay between requests")
@@ -378,12 +448,17 @@ async def clear_cache():
 
 
 @app.get("/api/teams/{team_id}/solkoff-details")
-async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dict[str, Any]:
+async def get_solkoff_details(
+    team_id: int,
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get detailed Solkoff coefficient calculation for a team.
     
     Args:
         team_id: Team ID
         season: Optional season start year. Omit for the current season.
+        competition: Optional competition code. Omit for the configured default.
         
     Returns:
         Detailed breakdown of Solkoff coefficient calculation
@@ -391,12 +466,13 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
 
     # Archived seasons reconstruct the breakdown from stored results only.
     if requested != current_season_year():
         try:
-            details = build_breakdown(db, team_id, requested, _competition_id())
+            details = build_breakdown(db, team_id, requested, competition_id)
         except Exception as e:
             logger.error(f"Error building historical Solkoff details: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
@@ -415,17 +491,16 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
         if not team_info:
             raise HTTPException(status_code=404, detail="Team not found")
         
-        # Get Solkoff coefficient
+        # Get Solkoff coefficient for this competition
         solkoff_result = db.fetchone("""
             SELECT solkoff_value
             FROM solkoff_coefficients
-            WHERE team_id = ?
-        """, (team_id,))
+            WHERE competition_id = ? AND team_id = ?
+        """, (competition_id, team_id))
         
         solkoff_value = float(solkoff_result[0]) if solkoff_result and solkoff_result[0] is not None else 0.0
         
         # Current-season league-stage scope, matching the calculator exactly
-        competition_id = os.getenv("COMPETITION_ID", "CL")
         season_start, season_end = get_season_bounds()
         
         # Get opponent details with their points per game and match outcomes
@@ -445,12 +520,13 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                 s2.lost as opponent_lost
             FROM matches m
             JOIN teams t2 ON m.away_team_id = t2.id
-            LEFT JOIN standings s2 ON m.away_team_id = s2.team_id
+            LEFT JOIN standings s2
+                ON m.away_team_id = s2.team_id AND s2.competition_id = ?
             WHERE m.home_team_id = ? AND m.status = 'FINISHED'
               AND m.competition_id = ? AND m.stage = 'LEAGUE_STAGE'
               AND m."date" >= ? AND m."date" < ?
             ORDER BY m.date DESC
-        """, (team_id, competition_id, season_start, season_end))
+        """, (competition_id, team_id, competition_id, season_start, season_end))
         
         # Get all opponents from away matches with scores
         away_opponents = db.fetchall("""
@@ -468,12 +544,13 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
                 s2.lost as opponent_lost
             FROM matches m
             JOIN teams t2 ON m.home_team_id = t2.id
-            LEFT JOIN standings s2 ON m.home_team_id = s2.team_id
+            LEFT JOIN standings s2
+                ON m.home_team_id = s2.team_id AND s2.competition_id = ?
             WHERE m.away_team_id = ? AND m.status = 'FINISHED'
               AND m.competition_id = ? AND m.stage = 'LEAGUE_STAGE'
               AND m."date" >= ? AND m."date" < ?
             ORDER BY m.date DESC
-        """, (team_id, competition_id, season_start, season_end))
+        """, (competition_id, team_id, competition_id, season_start, season_end))
         
         # Combine and aggregate opponents with match details
         opponents_dict = {}
@@ -613,7 +690,10 @@ async def get_solkoff_details(team_id: int, season: Optional[int] = None) -> Dic
 
 
 @app.get("/api/playoff-pairs")
-async def get_playoff_pairs(season: Optional[int] = None) -> List[Dict[str, Any]]:
+async def get_playoff_pairs(
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Get current play-off pairs from the competition (all stages).
     
     Returns:
@@ -622,16 +702,17 @@ async def get_playoff_pairs(season: Optional[int] = None) -> List[Dict[str, Any]
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
     try:
         from backend.api_client import APIClient
-        api_client = APIClient()
+        api_client = None
         analyzer = PlayoffAnalyzer(
-            db, api_client, competition_id=_competition_id(),
+            db, api_client, competition_id=competition_id,
             season_start_year=requested,
         )
         
-        pairs = analyzer.get_playoff_pairs(competition_id=_competition_id())
+        pairs = analyzer.get_playoff_pairs(competition_id=competition_id)
         logger.info(f"Found {len(pairs)} play-off pairs")
         return pairs
     except Exception as e:
@@ -640,7 +721,10 @@ async def get_playoff_pairs(season: Optional[int] = None) -> List[Dict[str, Any]
 
 
 @app.get("/api/tournament/current-stage")
-async def get_current_stage(season: Optional[int] = None) -> Dict[str, Any]:
+async def get_current_stage(
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get the current tournament stage.
     
     Returns:
@@ -650,16 +734,17 @@ async def get_current_stage(season: Optional[int] = None) -> Dict[str, Any]:
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
     try:
         from backend.api_client import APIClient
-        api_client = APIClient()
+        api_client = None
         analyzer = PlayoffAnalyzer(
-            db, api_client, competition_id=_competition_id(),
+            db, api_client, competition_id=competition_id,
             season_start_year=requested,
         )
         
-        current_stage = analyzer.get_current_stage(_competition_id())
+        current_stage = analyzer.get_current_stage(competition_id)
         logger.info(f"Current tournament stage: {current_stage}")
         return {"stage": current_stage}
     except Exception as e:
@@ -689,8 +774,9 @@ async def debug_knockout_matches() -> Dict[str, Any]:
             FROM matches m
             JOIN teams t1 ON m.home_team_id = t1.id
             JOIN teams t2 ON m.away_team_id = t2.id
-            WHERE (m.stage IS NOT NULL AND m.stage != 'LEAGUE_STAGE') 
-               OR (m.stage IS NULL AND m.matchday >= 7 AND (m.group_name IS NULL OR m.group_name = ''))
+            WHERE ((m.stage IS NOT NULL AND m.stage != 'LEAGUE_STAGE') 
+               OR (m.stage IS NULL AND m.matchday >= 7 AND (m.group_name IS NULL OR m.group_name = '')))
+              AND m.stage IS DISTINCT FROM 'QUALIFYING'
             ORDER BY m.matchday, m.date
             LIMIT 50
         """)
@@ -719,12 +805,17 @@ async def debug_knockout_matches() -> Dict[str, Any]:
 
 
 @app.get("/api/knockout-pairs/{stage}")
-async def get_knockout_pairs_by_stage(stage: str, season: Optional[int] = None) -> List[Dict[str, Any]]:
+async def get_knockout_pairs_by_stage(
+    stage: str,
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Get play-off pairs for a specific stage.
     
     Args:
         stage: Stage identifier ('KNOCKOUT_PLAYOFF', 'ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL')
         season: Optional season start year. Omit for the current season.
+        competition: Optional competition code. Omit for the configured default.
     
     Returns:
         List of play-off pairs for the specified stage
@@ -736,20 +827,21 @@ async def get_knockout_pairs_by_stage(stage: str, season: Optional[int] = None) 
     if stage.upper() not in valid_stages:
         raise HTTPException(status_code=400, detail=f"Invalid stage. Must be one of: {', '.join(valid_stages)}")
 
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
     
     try:
         from backend.api_client import APIClient
         from backend.uefa_draws_scraper import UEFADrawsScraper
         
-        api_client = APIClient()
+        api_client = None
         analyzer = PlayoffAnalyzer(
-            db, api_client, competition_id=_competition_id(),
+            db, api_client, competition_id=competition_id,
             season_start_year=requested,
         )
         
         # First try to get pairs from database (actual matches)
-        pairs = analyzer.get_pairs_by_stage(stage.upper(), _competition_id())
+        pairs = analyzer.get_pairs_by_stage(stage.upper(), competition_id)
         
         # Current draws only exist for the current season; never fetch them for
         # an archived season.
@@ -774,13 +866,19 @@ async def get_knockout_pairs_by_stage(stage: str, season: Optional[int] = None) 
 
 
 @app.get("/api/playoff-pairs/{team1_id}/{team2_id}/analysis")
-async def get_playoff_analysis(team1_id: int, team2_id: int, season: Optional[int] = None) -> Dict[str, Any]:
+async def get_playoff_analysis(
+    team1_id: int,
+    team2_id: int,
+    season: Optional[int] = None,
+    competition: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get play-off pair analysis with league table based on common opponents.
     
     Args:
         team1_id: First team ID
         team2_id: Second team ID
         season: Optional season start year. Omit for the current season.
+        competition: Optional competition code. Omit for the configured default.
         
     Returns:
         Analysis with league table
@@ -788,12 +886,13 @@ async def get_playoff_analysis(team1_id: int, team2_id: int, season: Optional[in
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
     
+    competition_id = _resolve_competition(competition)
     requested = _resolve_season(season)
     try:
         from backend.api_client import APIClient
-        api_client = APIClient()
+        api_client = None
         analyzer = PlayoffAnalyzer(
-            db, api_client, competition_id=_competition_id(),
+            db, api_client, competition_id=competition_id,
             season_start_year=requested,
         )
         

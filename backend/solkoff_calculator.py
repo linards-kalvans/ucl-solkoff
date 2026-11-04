@@ -93,13 +93,15 @@ class SolkoffCalculator:
         if not opponents:
             return 0.0
         
-        # Get points and games played for all opponents
+        # Get points and games played for all opponents in this competition only.
+        # Missing rows for the target competition must yield no stats (0.0),
+        # never a fallback to another competition's standings.
         placeholders = ','.join(['?'] * len(opponents))
         opponent_stats = self.db.fetchall(f"""
             SELECT points, played FROM standings
-            WHERE team_id IN ({placeholders})
-        """, tuple(opponents))
-        
+            WHERE competition_id = ? AND team_id IN ({placeholders})
+        """, (self.competition_id,) + tuple(opponents))
+
         # Calculate average points per game of opponents
         opponent_ppg_list = []
         for row in opponent_stats:
@@ -117,24 +119,32 @@ class SolkoffCalculator:
         return round(solkoff_value, 3)
     
     def calculate_all(self):
-        """Calculate Solkoff coefficients for all teams and store in database."""
-        # Get all teams
-        teams = self.db.fetchall("SELECT id FROM teams")
-        
+        """Calculate Solkoff coefficients for this competition's standings.
+
+        Only clubs that appear in the configured competition's live standings
+        are (re)written, so a calculation for one competition can never erase or
+        overwrite another competition's coefficients.
+        """
+        # Clubs tracked by this competition's live standings snapshot.
+        teams = self.db.fetchall(
+            "SELECT team_id FROM standings WHERE competition_id = ?",
+            (self.competition_id,),
+        )
+
         now = datetime.utcnow().isoformat()
-        
+
         for team_row in teams:
             team_id = team_row[0]
             solkoff_value = self.calculate_solkoff(team_id)
-            
-            # Store in database
+
+            # Store in database, scoped to this competition
             self.db.execute("""
-                INSERT INTO solkoff_coefficients (team_id, solkoff_value, calculated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT (team_id) DO UPDATE SET
+                INSERT INTO solkoff_coefficients (competition_id, team_id, solkoff_value, calculated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (competition_id, team_id) DO UPDATE SET
                     solkoff_value = excluded.solkoff_value,
                     calculated_at = excluded.calculated_at
-            """, (team_id, solkoff_value, now))
-        
+            """, (self.competition_id, team_id, solkoff_value, now))
+
         self.db.commit()
 
