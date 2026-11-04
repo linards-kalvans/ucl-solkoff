@@ -1,0 +1,10 @@
+[Unit]
+Description=Retain active and rollback UCL Docker release images
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+UMask=0077
+ExecStart=/usr/bin/flock -n /opt/ucl-solkoff/.release.lock /usr/bin/python3 /opt/ucl-solkoff/prune_release_images.py --apply
