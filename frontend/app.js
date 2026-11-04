@@ -2,12 +2,25 @@
 // Auto-detect API base URL based on environment
 const API_BASE_URL = window.location.origin;
 
+// Season selection: the current season is resolved from /api/seasons and every
+// season-dependent GET carries the selected start year. `seasonGen` drops
+// responses that belong to a season the user already switched away from.
+let seasons = [];
+let selectedSeason = null; // season start year; null until resolved (backend defaults to current)
+let currentSeason = null;  // resolved current season, for historical-date display
+let seasonGen = 0;
+
 let standingsData = [];
 // Multi-column sort: array of {column, direction} objects
 // Default: Strength only
 let sortOrders = [
     {column: 'strengthScore', direction: 'desc'}
 ];
+// League toolbar state: case-insensitive search + advanced-column visibility
+let searchQuery = '';
+let advancedColumns = true;
+// #leagueSort preset value -> standings field; 'custom' means header-built orders
+const SORT_PRESETS = { strength: 'strengthScore', solkoff: 'solkoffCoefficient', points: 'points' };
 
 // Cache for Solkoff details to avoid repeated API calls
 let solkoffDetailsCache = {};
@@ -16,6 +29,11 @@ let currentStage = 'LEAGUE';
 let playoffAnalysisCache = {};
 let currentPairsList = []; // Store current pairs for navigation
 let currentPairIndex = -1; // Current pair index in the list
+// Analysis sidebar state: generation counter drops late analysis responses,
+// the recorded selection drives card highlighting and focus return.
+let analysisRequestGen = 0;
+let activeAnalysisSelection = null; // {team1Id, team2Id} of the open analysis
+let lastAnalysisCard = null;        // card that initiated the open analysis
 
 // Stage mapping
 const STAGE_MAP = {
@@ -36,8 +54,9 @@ const STAGE_DISPLAY_NAMES = {
     'final': 'Final'
 };
 
-// Helper function to format match dates
-function formatMatchDate(dateString) {
+// Helper function to format match dates. Archived seasons keep their real
+// dates: the 6-month freshness window only guards the live feed.
+function formatMatchDate(dateString, allowHistorical = false) {
     if (!dateString) return '';
     
     try {
@@ -59,11 +78,14 @@ function formatMatchDate(dateString) {
         }
         
         // Also check if date is in the past (more than 6 months ago for scheduled matches)
-        // This catches invalid placeholder dates like July 2025 when we're in 2026
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(now.getMonth() - 6);
-        if (date < sixMonthsAgo) {
-            return ''; // Don't show old/invalid dates
+        // This catches invalid placeholder dates like July 2025 when we're in 2026.
+        // Archived seasons legitimately have older dates, so skip this window then.
+        if (!allowHistorical) {
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(now.getMonth() - 6);
+            if (date < sixMonthsAgo) {
+                return ''; // Don't show old/invalid dates
+            }
         }
         
         // Format as readable date
@@ -78,48 +100,76 @@ function formatMatchDate(dateString) {
     }
 }
 
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('DOM loaded, initializing...');
-    
-    // Initialize tabs
-    initializeTabs();
-    
-    // Check for URL hash first (for permalinks)
-    const hash = window.location.hash.slice(1); // Remove the '#'
-    const validTabIds = ['league', 'knockout-playoff', 'round-of-16', 'quarter-final', 'semi-final', 'final'];
-    
-    if (hash && validTabIds.includes(hash)) {
-        // Hash takes precedence - activate the tab from URL
-        console.log(`Activating tab from URL hash: ${hash}`);
-        activateTab(hash);
-    } else {
-        // No valid hash, ensure knockout-playoff tab is active by default (matches HTML)
-        // This ensures it loads immediately even if loadCurrentStage is async
-        const knockoutTabBtn = document.querySelector('.tab-btn[data-tab="knockout-playoff"]');
-        const knockoutTabPane = document.getElementById('knockout-playoff-tab');
-        if (knockoutTabBtn && knockoutTabPane && knockoutTabBtn.classList.contains('active')) {
-            // Load content for knockout-playoff tab immediately
-            loadTabContent('knockout-playoff');
-        }
-        
-        // Load current stage and switch to appropriate tab (defaults to knockout-playoff)
-        loadCurrentStage();
+function isHistoricalSeason() {
+    return selectedSeason != null && currentSeason != null && selectedSeason < currentSeason;
+}
+
+// Tooltip for the league-position badge: names the selected season's table so an
+// archived view never claims to show the current UCL standings.
+function leaguePositionTitle() {
+    if (isHistoricalSeason()) {
+        const season = seasons.find(s => s.year === selectedSeason);
+        return `Position in the ${season ? season.label : selectedSeason} league table`;
     }
-    
-    // Listen for hash changes (back/forward browser buttons)
-    window.addEventListener('hashchange', () => {
-        const newHash = window.location.hash.slice(1);
-        if (newHash && validTabIds.includes(newHash)) {
-            activateTab(newHash);
-        }
-    });
+    return 'Position in current UCL league table';
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', async () => {
+    console.log('DOM loaded, initializing...');
+
+    // Resolve selectable seasons first so every season-dependent GET below and
+    // later carries the selected year. Falls back to backend default when the
+    // endpoint is unavailable.
+    await fetchSeasons();
+
+    // Initialize primary view navigation
+    initializePrimaryNav();
+
+    // Initialize stage tabs
+    initializeTabs();
+
+    // Knockout analysis sidebar: close button + scoped arrow/Escape keys
+    initializeKnockoutSidebar();
+
+    // Overview first paint: explicit loading states until data arrives
+    renderOverview();
+
+    // Resolve the initial route from the URL hash
+    const route = resolveRoute(window.location.hash);
+    if (route.stage) {
+        // Explicit stage permalink: knockout view + that stage
+        explicitStageChosen = true;
+        currentRoute.stage = route.stage; // skip provisional default, load once
+        activateView('knockout', { updateHash: false });
+        activateTab(route.stage, { updateHash: false });
+    } else {
+        activateView(route.view, { updateHash: false });
+    }
+    // Raw standings feed Overview metrics/rankings and are reused by League.
+    ensureStandingsLoaded();
+    // Resolve the initial knockout stage for generic Knockout visits; once known,
+    // Overview previews that stage's pairs (never overriding user route/choice).
+    loadCurrentStage().then(() => loadOverviewKnockout());
+
+    // Browser back/forward (popstate + hashchange both fire; syncFromLocation dedupes)
+    window.addEventListener('popstate', syncFromLocation);
+    window.addEventListener('hashchange', syncFromLocation);
     
     // Refresh button
     const refreshBtn = document.getElementById('refreshBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             refreshData();
+        });
+    }
+
+    // Season switcher
+    const seasonSelect = document.getElementById('seasonSelect');
+    if (seasonSelect) {
+        seasonSelect.addEventListener('change', () => {
+            const year = parseInt(seasonSelect.value, 10);
+            if (Number.isInteger(year)) switchSeason(year);
         });
     }
     
@@ -148,6 +198,33 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // League toolbar: search, sort preset, advanced columns
+    const teamSearch = document.getElementById('teamSearch');
+    if (teamSearch) {
+        teamSearch.addEventListener('input', () => {
+            searchQuery = teamSearch.value;
+            renderLeague();
+        });
+    }
+
+    const leagueSort = document.getElementById('leagueSort');
+    if (leagueSort) {
+        leagueSort.addEventListener('change', () => {
+            const column = SORT_PRESETS[leagueSort.value];
+            if (!column) return; // 'custom' is a display state, not a preset
+            sortOrders = [{ column: column, direction: 'desc' }];
+            renderLeague();
+        });
+    }
+
+    const advancedToggle = document.getElementById('advancedToggle');
+    if (advancedToggle) {
+        advancedToggle.addEventListener('change', () => {
+            advancedColumns = advancedToggle.checked;
+            renderLeague();
+        });
+    }
+
     // Intro banner
     showIntroIfFirstVisit();
     const dismissBtn = document.getElementById('introDismissBtn');
@@ -156,12 +233,120 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// ---------------------------------------------------------------------------
+// Primary view routing (UCL Strength Lab)
+// ---------------------------------------------------------------------------
+const PRIMARY_VIEWS = ['overview', 'league', 'knockout'];
+const STAGE_TAB_IDS = ['knockout-playoff', 'round-of-16', 'quarter-final', 'semi-final', 'final'];
+const DEFAULT_KNOCKOUT_STAGE = 'round-of-16';
+// In-page anchors that are not routes: keep current view on hashchange
+const IGNORED_ANCHOR_HASHES = ['main-content'];
+
+let currentRoute = { view: 'overview', stage: null };
+let explicitStageChosen = false;   // true after a stage hash or a user stage click
+let standingsRequested = false;    // avoid duplicate league loads from routing
+let initialKnockoutStage = DEFAULT_KNOCKOUT_STAGE; // resolved from the stage API
+
+function resolveRoute(hash) {
+    const h = (hash || '').replace(/^#/, '');
+    if (h === 'overview') return { view: 'overview', stage: null };
+    if (h === 'league') return { view: 'league', stage: null };
+    if (h === 'knockout') return { view: 'knockout', stage: null };
+    if (STAGE_TAB_IDS.includes(h)) return { view: 'knockout', stage: h };
+    return { view: 'overview', stage: null };
+}
+
+function routeMatches(a, b) {
+    return a.view === b.view && a.stage === b.stage;
+}
+
+function syncFromLocation() {
+    const raw = (window.location.hash || '').replace(/^#/, '');
+    if (IGNORED_ANCHOR_HASHES.includes(raw)) return; // skip-link and other in-page anchors
+    const route = resolveRoute(window.location.hash);
+    if (routeMatches(route, currentRoute)) return; // dedupe popstate+hashchange pairs
+    if (route.stage) {
+        explicitStageChosen = true;
+        if (currentRoute.view !== 'knockout') {
+            currentRoute.stage = route.stage; // skip provisional default, load once
+            activateView('knockout', { updateHash: false });
+        }
+        activateTab(route.stage, { updateHash: false });
+    } else {
+        if (route.view === 'knockout') currentRoute.stage = null; // drop stale stage
+        activateView(route.view, { updateHash: false });
+    }
+}
+
+function activateView(view, { updateHash = true } = {}) {
+    if (!PRIMARY_VIEWS.includes(view)) view = 'overview';
+    if (view === 'knockout') {
+        currentRoute.view = 'knockout';
+    } else {
+        currentRoute = { view, stage: null };
+    }
+
+    // Primary nav selected state + roving tabindex
+    document.querySelectorAll('[data-view]').forEach(btn => {
+        const on = btn.dataset.view === view;
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        btn.tabIndex = on ? 0 : -1;
+    });
+
+    // Panels: only the active one is visible
+    PRIMARY_VIEWS.forEach(id => {
+        const panel = document.getElementById(id);
+        if (panel) panel.hidden = id !== view;
+    });
+
+    if (view === 'knockout' && !currentRoute.stage) {
+        // Generic Knockout: use the API-resolved initial stage (or fallback)
+        activateTab(initialKnockoutStage, { updateHash: false });
+    }
+
+    if (view === 'league') {
+        ensureStandingsLoaded();
+    }
+
+    if (updateHash) {
+        const target = view === 'knockout' ? `#${currentRoute.stage}` : `#${view}`;
+        if (window.location.hash !== target) {
+            window.history.pushState(null, '', target);
+        }
+    }
+}
+
+function initializePrimaryNav() {
+    const navButtons = Array.from(document.querySelectorAll('.primary-nav [data-view]'));
+    navButtons.forEach(btn => {
+        btn.addEventListener('click', () => activateView(btn.dataset.view));
+        btn.addEventListener('keydown', (e) => {
+            const idx = navButtons.indexOf(e.currentTarget);
+            let target = null;
+            if (e.key === 'ArrowRight') {
+                target = navButtons[(idx + 1) % navButtons.length];
+            } else if (e.key === 'ArrowLeft') {
+                target = navButtons[(idx - 1 + navButtons.length) % navButtons.length];
+            } else if (e.key === 'Home') {
+                target = navButtons[0];
+            } else if (e.key === 'End') {
+                target = navButtons[navButtons.length - 1];
+            }
+            if (target) {
+                e.preventDefault();
+                target.focus();
+                target.click();
+            }
+        });
+    });
+}
+
 function initializeTabs() {
     const tabButtons = document.querySelectorAll('.tab-btn');
     tabButtons.forEach(btn => {
         btn.addEventListener('click', () => {
             const tabId = btn.dataset.tab;
-            activateTab(tabId);
+            activateTab(tabId, { userChose: true });
         });
 
         // WAI-ARIA roving tabindex: arrow key navigation within tablist
@@ -187,70 +372,172 @@ function initializeTabs() {
     });
 }
 
-async function loadCurrentStage() {
+// ---------------------------------------------------------------------------
+// Season selection
+// ---------------------------------------------------------------------------
+function seasonQuery() {
+    return selectedSeason != null ? `?season=${selectedSeason}` : '';
+}
+
+async function fetchSeasons(attempt = 1) {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage`);
+        const response = await fetch(`${API_BASE_URL}/api/seasons`);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
-        currentStage = data.stage;
-        
-        // Always default to knockout-playoff tab, regardless of API stage
-        // Only switch if we have actual knockout data for a later stage (not LEAGUE)
-        let tabId = 'knockout-playoff'; // Default
-        
-        // Only switch to a different knockout stage if we're past play-off
-        if (currentStage && currentStage !== 'LEAGUE' && currentStage !== 'KNOCKOUT_PLAYOFF') {
-            const mappedTabId = STAGE_MAP[currentStage];
-            if (mappedTabId && mappedTabId !== 'league') {
-                tabId = mappedTabId;
-            }
-        }
-        
-        // Only activate tab if it's different from current active tab
-        const currentActiveTab = document.querySelector('.tab-btn.active')?.getAttribute('data-tab');
-        if (currentActiveTab !== tabId) {
-            console.log(`Current stage: ${currentStage}, Switching to tab: ${tabId}`);
-            activateTab(tabId);
+        const list = data && Array.isArray(data.seasons) ? data.seasons : [];
+        const current = data && Number.isInteger(data.currentSeason) ? data.currentSeason : null;
+        if (list.length > 0) {
+            seasons = list;
+            currentSeason = current != null ? current : list[0].year;
+        } else if (current != null) {
+            // Degenerate/older response: still offer the current season alone
+            // rather than leaving the switcher dead.
+            const next = String((current + 1) % 100).padStart(2, '0');
+            seasons = [{ year: current, label: `${current}/${next}` }];
+            currentSeason = current;
         } else {
-            console.log(`Current stage: ${currentStage}, Keeping tab: ${tabId}`);
+            return; // nothing usable: keep the default (no season param) behaviour
         }
+        selectedSeason = currentSeason;
+        renderSeasonOptions();
     } catch (error) {
-        console.error('Error loading current stage:', error);
-        // Default to knockout-playoff tab
-        console.log('Defaulting to knockout-playoff tab');
-        activateTab('knockout-playoff');
+        console.error('Error loading seasons:', error);
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            return fetchSeasons(attempt + 1);
+        }
     }
 }
 
-function activateTab(tabId) {
-    // Remove active class from all tabs and panes
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
-    
-    // Activate selected tab
+function renderSeasonOptions() {
+    const select = document.getElementById('seasonSelect');
+    if (!select) return;
+    select.innerHTML = seasons.map(season =>
+        `<option value="${season.year}">${escapeHtml(season.label || String(season.year))}</option>`
+    ).join('');
+    if (selectedSeason != null) select.value = String(selectedSeason);
+    // A single season needs no switcher; disable to keep the control honest.
+    select.disabled = seasons.length <= 1;
+}
+
+// Switching seasons clears every payload tied to the previous season and
+// reloads all views. Generation guards (module counters + seasonGen) ensure a
+// late response for the old season can never paint over the new selection.
+async function switchSeason(year) {
+    if (year === selectedSeason) return;
+    selectedSeason = year;
+    const sgen = ++seasonGen;
+
+    solkoffDetailsCache = {};
+    playoffAnalysisCache = {};
+    pairsByStage = {};
+    currentPairsList = [];
+    currentPairIndex = -1;
+    expandedTeamId = null;
+    standingsData = [];
+    standingsState = 'loading';
+    overviewPairs = null;
+    pairsState = 'loading';
+    standingsRequested = true; // the reload below *is* the league load
+    closeActiveAnalysis({ invalidate: true, focusCard: false });
+
+    const tableBody = document.getElementById('standingsBody');
+    if (tableBody) tableBody.innerHTML = renderSkeletonRows(10);
+    renderOverview();
+
+    // Re-resolve the selected season's stage before reloading the views.
+    const stageBefore = currentRoute.stage;
+    await loadCurrentStage();
+    if (sgen !== seasonGen) return; // another switch happened mid-flight
+
+    // Generic Knockout may have been re-pointed at the season's stage already;
+    // a retained explicit stage still needs its pairs reloaded for the season.
+    if (currentRoute.view === 'knockout' && currentRoute.stage === stageBefore) {
+        loadTabContent(currentRoute.stage);
+    }
+    loadStandings();
+    loadOverviewKnockout();
+}
+
+async function loadCurrentStage() {
+    const sgen = seasonGen;
+    let stage = null;
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/tournament/current-stage${seasonQuery()}`);
+        if (sgen !== seasonGen) return; // season switched mid-flight
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        if (sgen !== seasonGen) return;
+        stage = data.stage;
+    } catch (error) {
+        if (sgen !== seasonGen) return;
+        console.error('Error loading current stage:', error);
+    }
+    if (sgen !== seasonGen) return;
+    currentStage = stage || 'LEAGUE';
+
+    let tabId = DEFAULT_KNOCKOUT_STAGE; // LEAGUE and failures fall back to Round of 16
+    const mappedTabId = STAGE_MAP[currentStage];
+    if (mappedTabId && mappedTabId !== 'league') {
+        tabId = mappedTabId;
+    }
+    // Remember the resolved choice for later generic Knockout visits
+    initialKnockoutStage = tabId;
+
+    // Initial knockout stage only: never override the primary view, an explicit
+    // stage hash, or a stage the user already clicked into.
+    if (explicitStageChosen) return;
+    if (currentRoute.view !== 'knockout') return;
+
+    if (tabId !== currentRoute.stage) {
+        console.log(`Current stage: ${currentStage}, initial knockout tab: ${tabId}`);
+        // Auto-switching our own provisional default: keep the URL in sync with
+        // the visible selection. Explicit user choices return before this point,
+        // so a user-picked stage or permalink is never overridden here.
+        activateTab(tabId, { updateHash: true });
+    }
+}
+
+function activateTab(tabId, { updateHash = true, userChose = false } = {}) {
     const tabBtn = document.querySelector(`.tab-btn[data-tab="${tabId}"]`);
     const tabPane = document.getElementById(`${tabId}-tab`);
-    
-    if (tabBtn && tabPane) {
-        tabBtn.classList.add('active');
-        tabPane.classList.add('active');
-        
-        // Hide loading indicator when switching tabs
-        const loadingEl = document.getElementById('loading');
-        if (loadingEl) {
-            loadingEl.style.display = 'none';
-        }
-        
-        // Update URL hash for permalink
-        if (window.location.hash !== `#${tabId}`) {
-            window.history.replaceState(null, '', `#${tabId}`);
-        }
-        
-        // Load content for the activated tab
-        loadTabContent(tabId);
+    if (!tabBtn || !tabPane) return;
+
+    // Stage tab selected state + roving tabindex
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        const on = btn.dataset.tab === tabId;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        btn.tabIndex = on ? 0 : -1;
+    });
+
+    // Panes live inside the knockout panel
+    document.querySelectorAll('#knockout .tab-pane').forEach(pane => pane.classList.remove('active'));
+    tabPane.classList.add('active');
+
+    if (userChose) explicitStageChosen = true;
+    currentRoute = { view: 'knockout', stage: tabId };
+
+    // Hide loading indicator when switching tabs
+    const loadingEl = document.getElementById('loading');
+    if (loadingEl) {
+        loadingEl.style.display = 'none';
     }
+
+    // Update URL hash for permalink / back-forward support
+    if (updateHash) {
+        const target = `#${tabId}`;
+        if (window.location.hash !== target) {
+            window.history.pushState(null, '', target);
+        }
+    }
+
+    // Load content for the activated tab
+    loadTabContent(tabId);
 }
 
 function loadTabContent(tabId) {
@@ -264,7 +551,44 @@ function loadTabContent(tabId) {
     }
 }
 
+// Per-stage pair cache (stage key -> Promise<pairs[]>), shared between the
+// Overview preview and the Knockout tab so a stage is fetched at most once.
+let pairsByStage = {};
+// Generation counter for tab loads: hidden panes may keep their own containers
+// and cache, but only the newest load may overwrite the shared selection list.
+let knockoutLoadGen = 0;
+
+function fetchKnockoutPairsOnce(stage) {
+    if (!pairsByStage[stage]) {
+        const promise = fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}${seasonQuery()}`)
+            .then(response => {
+                if (response.status === 404 || response.status === 400) {
+                    const err = new Error(`No data available for ${stage}`);
+                    err.noData = true;
+                    throw err;
+                }
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(pairs => {
+                if (!Array.isArray(pairs)) {
+                    throw new Error(`Invalid pairs payload for ${stage}`);
+                }
+                return pairs;
+            });
+        pairsByStage[stage] = promise;
+        // A failed fetch must not poison the cache for later visits.
+        promise.catch(() => {
+            if (pairsByStage[stage] === promise) delete pairsByStage[stage];
+        });
+    }
+    return pairsByStage[stage];
+}
+
 async function loadKnockoutPairs(stage, tabId) {
+    const gen = ++knockoutLoadGen;
     const containerId = `${tabId}-pairs`;
     const container = document.getElementById(containerId);
     
@@ -273,6 +597,16 @@ async function loadKnockoutPairs(stage, tabId) {
         return;
     }
     
+    // Stage change invalidates the open analysis: the sidebar, the card
+    // selection and any in-flight analysis fetch belong to the old stage.
+    closeActiveAnalysis({ invalidate: true, focusCard: false });
+    
+    // Only the newest stage's cards live in the DOM: empty the other panes so
+    // stale pairs can never leak into #knockout queries or a11y text.
+    document.querySelectorAll('#knockout .playoff-pairs').forEach(other => {
+        if (other !== container) other.innerHTML = '';
+    });
+    
     // Show loading only if this tab is active
     const tabPane = document.getElementById(`${tabId}-tab`);
     if (tabPane && tabPane.classList.contains('active')) {
@@ -280,39 +614,42 @@ async function loadKnockoutPairs(stage, tabId) {
     }
     
     try {
-        console.log(`Fetching pairs for stage: ${stage}, tabId: ${tabId}`);
-        const response = await fetch(`${API_BASE_URL}/api/knockout-pairs/${stage}`);
-        
-        if (response.status === 404 || response.status === 400) {
-            console.log(`No data available for ${stage}`);
-            showDataNotAvailable(container, stage);
-            return;
-        }
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const pairs = await response.json();
+        console.log(`Loading pairs for stage: ${stage}, tabId: ${tabId}`);
+        const pairs = await fetchKnockoutPairsOnce(stage);
         console.log(`Received ${pairs.length} pairs for ${stage}`);
         
+        // Late response for a stage the user already left: never touch the
+        // selected list or render into any pane.
+        if (gen !== knockoutLoadGen) return;
+        
         if (pairs.length === 0) {
-            showDataNotAvailable(container, stage);
+            showDataNotAvailable(container, stage, 'empty');
             return;
         }
         
-        // Store pairs globally for navigation
-        currentPairsList = pairs;
+        currentPairsList = pairs; // newest load only (guarded above)
         renderKnockoutPairs(pairs, container);
     } catch (error) {
+        if (gen !== knockoutLoadGen) return; // stale error must not clobber the list
         console.error(`Error loading pairs for ${stage}:`, error);
-        showDataNotAvailable(container, stage);
+        showDataNotAvailable(container, stage, error.noData ? 'empty' : 'error');
     }
 }
 
-function showDataNotAvailable(container, stage) {
+function showDataNotAvailable(container, stage, kind = 'empty') {
     const tabId = STAGE_MAP[stage] || stage.toLowerCase().replace('_', '-');
     const displayName = STAGE_DISPLAY_NAMES[tabId] || stage;
+    
+    // Distinct error copy so a failed fetch is never shown as "stage not
+    // started", and vice versa (empty stage must not read as an error).
+    if (kind === 'error') {
+        container.innerHTML = `
+            <div class="data-error" role="alert">
+                <p>Could not load ${displayName} pairs — please try again later.</p>
+            </div>
+        `;
+        return;
+    }
     
     // Check if we're in league stage - if so, provide more helpful message
     const isLeagueStage = currentStage === 'LEAGUE';
@@ -330,30 +667,112 @@ function showDataNotAvailable(container, stage) {
     `;
 }
 
+// A real stored score is a non-negative finite integer. Strings, booleans,
+// null and fractions are rejected so no malformed value can be coerced to 0 or
+// injected into markup (values are interpolated, not escaped).
+function isScoreValue(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+// Both scores must be real score values; a missing/malformed side is never
+// rendered as an invented 0-0.
+function hasBothScores(leg) {
+    return !!leg && isScoreValue(leg.homeScore) && isScoreValue(leg.awayScore);
+}
+
+// Only a well-formed two-entry aggregate of real score values is used; a
+// partial, null, string or otherwise malformed aggregate is unavailable.
+function normalizeAggregate(aggregate) {
+    if (!aggregate) return null;
+    if (!isScoreValue(aggregate.team1) || !isScoreValue(aggregate.team2)) return null;
+    return { team1: aggregate.team1, team2: aggregate.team2 };
+}
+
+// Orient a single fixture's goals to the pair's stable team1/team2 identity, so
+// a preview never flips the score when the payload's home side is team2.
+function legTeamScores(pair, leg) {
+    const team1Id = Number((pair.team1 || {}).id);
+    return Number(leg.homeTeamId) === team1Id
+        ? { team1: leg.homeScore, team2: leg.awayScore }
+        : { team1: leg.awayScore, team2: leg.homeScore };
+}
+
+// Resolve a leg's team id to the pair's stable team name, so orientation never
+// depends on the latest leg's home/away order.
+function pairTeamName(pair, teamId) {
+    const t1 = pair.team1 || {};
+    const t2 = pair.team2 || {};
+    if (Number(t1.id) === Number(teamId)) return t1.name || '';
+    if (Number(t2.id) === Number(teamId)) return t2.name || '';
+    return '';
+}
+
+// Full-card results: every scored leg with home/away labels plus an explicitly
+// labelled aggregate. Unscored/scheduled fixtures contribute nothing, so no
+// score is ever fabricated. A drawn aggregate is labelled a draw, never a
+// winner (stored goals cannot encode a shootout).
+function pairResultsHtml(pair) {
+    const legs = Array.isArray(pair.legs) ? pair.legs.filter(hasBothScores) : [];
+    const aggregate = normalizeAggregate(pair.aggregateScore);
+    if (legs.length === 0 && !aggregate) return '';
+
+    const legHtml = legs.map(leg =>
+        `<div class="pair-leg">` +
+        `<span class="leg-side"><span class="leg-tag">Home</span> ${escapeHtml(pairTeamName(pair, leg.homeTeamId))}</span>` +
+        `<span class="leg-score">${leg.homeScore}-${leg.awayScore}</span>` +
+        `<span class="leg-side"><span class="leg-tag">Away</span> ${escapeHtml(pairTeamName(pair, leg.awayTeamId))}</span>` +
+        `</div>`
+    ).join('');
+
+    const aggregateHtml = aggregate
+        ? `<div class="pair-aggregate"><span class="aggregate-label">Aggregate</span> ` +
+          `<span class="aggregate-score">${aggregate.team1}-${aggregate.team2}</span></div>`
+        : '';
+
+    return `<div class="pair-results">${legHtml}${aggregateHtml}</div>`;
+}
+
+// Compact preview result: the aggregate when available, otherwise the score of
+// a genuine single-leg fixture. A partial two-leg tie never masquerades as a
+// single match, and scheduled/unscored ties render nothing.
+function miniResultsHtml(pair) {
+    const aggregate = normalizeAggregate(pair.aggregateScore);
+    if (aggregate) {
+        return `<div class="mini-result"><span class="aggregate-label">Aggregate</span> ` +
+            `<span class="aggregate-score">${aggregate.team1}-${aggregate.team2}</span></div>`;
+    }
+    const legs = Array.isArray(pair.legs) ? pair.legs : [];
+    if (legs.length === 1 && hasBothScores(legs[0])) {
+        const score = legTeamScores(pair, legs[0]);
+        return `<div class="mini-result">${score.team1}-${score.team2}</div>`;
+    }
+    return '';
+}
+
 function renderKnockoutPairs(pairs, container) {
     container.innerHTML = '';
     
     if (pairs.length === 0) {
-        container.innerHTML = '<div class="data-not-available"><p>No pairs found for this stage.</p></div>';
+        container.innerHTML = '<div class="data-not-available"><p>No pairs available for this stage yet.</p></div>';
         return;
     }
     
     const pairsGrid = document.createElement('div');
     pairsGrid.className = 'playoff-pairs-grid';
+    // Selectable-card list: cards are options, Enter/Space opens the sidebar.
+    pairsGrid.setAttribute('role', 'listbox');
+    const gridTabId = container.id.replace(/-pairs$/, '');
+    pairsGrid.setAttribute('aria-label',
+        `${STAGE_DISPLAY_NAMES[gridTabId] || 'Knockout'} pair list`);
     
     pairs.forEach((pair) => {
         const pairCard = document.createElement('div');
         pairCard.className = 'playoff-pair-card';
+        pairCard.setAttribute('role', 'option');
+        pairCard.setAttribute('aria-selected', 'false');
+        pairCard.tabIndex = 0;
         pairCard.dataset.team1Id = pair.team1.id;
         pairCard.dataset.team2Id = pair.team2.id;
-        
-        const team1Logo = pair.team1.crest 
-            ? `<img src="${pair.team1.crest}" alt="${pair.team1.name}" class="pair-team-logo" onerror="this.style.display='none'">`
-            : '<span class="pair-team-logo-placeholder"></span>';
-        
-        const team2Logo = pair.team2.crest 
-            ? `<img src="${pair.team2.crest}" alt="${pair.team2.name}" class="pair-team-logo" onerror="this.style.display='none'">`
-            : '<span class="pair-team-logo-placeholder"></span>';
         
         const statusBadge = pair.status === 'FINISHED' 
             ? '<span class="status-badge finished">Finished</span>'
@@ -363,22 +782,22 @@ function renderKnockoutPairs(pairs, container) {
             ? '<span class="status-badge live">Live</span>'
             : '';
         
-        // Calculate win probability display (excluding draws)
-        let winProbabilityHtml = '';
-        if (pair.winProbability) {
-            const prob = pair.winProbability;
-            // Normalize probabilities excluding draws to ensure they sum to 100%
-            const winTotal = (prob.team1Win || 0) + (prob.team2Win || 0);
-            const normalizedTeam1 = winTotal > 0 ? (prob.team1Win || 0) / winTotal : 0.5;
-            const normalizedTeam2 = winTotal > 0 ? (prob.team2Win || 0) / winTotal : 0.5;
-            const team1Win = (normalizedTeam1 * 100).toFixed(1);
-            const team2Win = (normalizedTeam2 * 100).toFixed(1);
-            
+        // Calculate win probability display (excluding draws). Default or
+        // no-signal methods and zero totals render as unavailable — never a
+        // fabricated 50/50.
+        const probNorm = normalizeWinProbability(pair.winProbability);
+        let winProbabilityHtml = `
+                <div class="pair-probability">
+                    <div class="pair-probability-unavailable">Win probability unavailable</div>
+                </div>`;
+        if (probNorm) {
+            const team1Win = (probNorm.team1 * 100).toFixed(1);
+            const team2Win = (probNorm.team2 * 100).toFixed(1);
             winProbabilityHtml = `
                 <div class="pair-probability">
                     <div style="flex: 1;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                            <span class="probability-label" style="font-size: 0.8em;">${pair.team1.name}</span>
+                            <span class="probability-label" style="font-size: 0.8em;">${escapeHtml(pair.team1.name)}</span>
                             <span class="probability-value">${team1Win}%</span>
                         </div>
                         <div class="probability-bar-mini">
@@ -387,7 +806,7 @@ function renderKnockoutPairs(pairs, container) {
                     </div>
                     <div style="flex: 1; margin-left: 10px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                            <span class="probability-label" style="font-size: 0.8em;">${pair.team2.name}</span>
+                            <span class="probability-label" style="font-size: 0.8em;">${escapeHtml(pair.team2.name)}</span>
                             <span class="probability-value">${team2Win}%</span>
                         </div>
                         <div class="probability-bar-mini">
@@ -401,32 +820,53 @@ function renderKnockoutPairs(pairs, container) {
         pairCard.innerHTML = `
             <div class="pair-header">
                 <div class="pair-team">
-                    ${team1Logo}
-                    <span class="pair-team-name">${pair.team1.name}</span>
+                    ${crestHtml(pair.team1.crest, pair.team1.name)}
+                    <span class="pair-team-name">${escapeHtml(pair.team1.name)}</span>
                 </div>
                 <div class="pair-vs">vs</div>
                 <div class="pair-team">
-                    ${team2Logo}
-                    <span class="pair-team-name">${pair.team2.name}</span>
+                    ${crestHtml(pair.team2.crest, pair.team2.name)}
+                    <span class="pair-team-name">${escapeHtml(pair.team2.name)}</span>
                 </div>
             </div>
             <div class="pair-meta">
                 ${statusBadge}
-                ${pair.date ? `<span class="pair-date">${formatMatchDate(pair.date)}</span>` : ''}
+                ${pair.date ? `<span class="pair-date">${escapeHtml(formatMatchDate(pair.date, isHistoricalSeason()))}</span>` : ''}
             </div>
+            ${pairResultsHtml(pair)}
             ${winProbabilityHtml}
-            <button class="pair-analyze-btn" onclick="showPlayoffAnalysis(${pair.team1.id}, ${pair.team2.id})">
-                View Historical Analysis
-            </button>
+            <span class="pair-analyze-btn">View Historical Analysis</span>
         `;
         
         pairsGrid.appendChild(pairCard);
     });
     
     container.appendChild(pairsGrid);
+    wireCrestFallbacks(container);
+    
+    // Listeners (never inline handlers): clicking or Enter/Space on a card
+    // selects it and opens the persistent analysis sidebar.
+    container.querySelectorAll('.playoff-pair-card').forEach(card => {
+        const open = () => showPlayoffAnalysis(
+            Number(card.dataset.team1Id), Number(card.dataset.team2Id), card);
+        card.addEventListener('click', () => {
+            card.focus();
+            open();
+        });
+        card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                open();
+            }
+        });
+    });
+    
+    // A selection that survived this re-render (same stage) keeps its marks.
+    markAnalysisSelection();
 }
 
 async function loadStandings() {
+    const gen = ++standingsGen; // generation guard: only the newest load may write
     const loadingEl = document.getElementById('loading');
     const errorEl = document.getElementById('error');
     const tableBody = document.getElementById('standingsBody');
@@ -436,10 +876,10 @@ async function loadStandings() {
         return;
     }
     
-    // Show loading if element exists and league tab is active
+    // Show loading if element exists and league view panel is active
     if (loadingEl) {
-        const leagueTab = document.getElementById('league-tab');
-        if (leagueTab && leagueTab.classList.contains('active')) {
+        const leaguePanel = document.getElementById('league');
+        if (leaguePanel && !leaguePanel.hidden) {
             loadingEl.style.display = 'block';
             console.log('Showing loading indicator');
         }
@@ -448,55 +888,76 @@ async function loadStandings() {
     if (errorEl) {
         errorEl.style.display = 'none';
     }
+    // A new load replaces whatever failure status is showing; honest state
+    // only ever reflects the newest request.
+    clearAppStatus();
 
     // Show skeleton rows while loading
     tableBody.innerHTML = renderSkeletonRows(10);
 
     try {
-        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings`);
-        const response = await fetch(`${API_BASE_URL}/api/standings`);
+        console.log('Fetching standings from:', `${API_BASE_URL}/api/standings${seasonQuery()}`);
+        const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
-        standingsData = await response.json();
+        const data = await response.json();
+        if (gen !== standingsGen) return; // stale: a newer standings load superseded this
+        standingsData = data;
         console.log('Standings data received:', standingsData ? standingsData.length : 0, 'teams');
         
         if (standingsData && standingsData.length > 0) {
-            applySorting(); // Apply current sort orders
-            renderTable(standingsData);
-            updateSortIndicators();
+            standingsState = 'ready';
+            renderLeague(); // filter/sort a copy; raw standings stay immutable
             updateLastUpdated();
             console.log('Table rendered successfully');
         } else {
+            standingsState = 'empty';
             console.warn('No standings data received');
-            tableBody.innerHTML = '<tr><td colspan="12" style="text-align: center; padding: 20px;">No standings data available</td></tr>';
+            tableBody.innerHTML = `<tr><td colspan="${visibleColumnCount()}" style="text-align: center; padding: 20px;">No standings data available</td></tr>`;
         }
+        renderOverviewStandings();
         
     } catch (error) {
+        if (gen !== standingsGen) return; // stale error must not clobber a newer result
         console.error('Error loading standings:', error);
+        standingsState = 'error';
         if (errorEl) {
             errorEl.textContent = `Error loading standings: ${error.message}`;
             errorEl.style.display = 'block';
         }
-        tableBody.innerHTML = '<tr><td colspan="12" style="text-align: center; padding: 20px; color: #dc3545;">Error: ' + error.message + '</td></tr>';
+        // Mirror to the global status when the League panel is hidden, so a
+        // standings failure is never swallowed on Overview/Knockout.
+        const leaguePanel = document.getElementById('league');
+        if (leaguePanel && leaguePanel.hidden) {
+            setAppStatus(`Standings unavailable — could not reload saved data (${error.message}). Use Reload data to try again.`);
+        }
+        tableBody.innerHTML = `<tr><td colspan="${visibleColumnCount()}" style="text-align: center; padding: 20px; color: #dc3545;">Error: ` + escapeHtml(error.message) + `</td></tr>`;
+        renderOverviewStandings();
     } finally {
-        // Always hide loading
-        if (loadingEl) {
+        // Always hide loading — but never let a superseded load (newer request
+        // or a season switch) clear the indicator the current load owns.
+        if (loadingEl && gen === standingsGen) {
             loadingEl.style.display = 'none';
             console.log('Hiding loading indicator');
         }
     }
 }
 
-function renderTable(data) {
+function renderTable(rows) {
     const tableBody = document.getElementById('standingsBody');
+    if (!tableBody) return;
+    const table = document.getElementById('standingsTable');
+    if (table) table.classList.toggle('advanced-off', !advancedColumns);
     tableBody.innerHTML = '';
 
-    // Compute min/max for color scale
-    const strengthValues = data.map(t => t.strengthScore || 0);
-    const ptsValues = data.map(t => t.points || 0);
+    // Color scale normalizes against the COMPLETE raw dataset, never the
+    // filtered/sorted subset, so hues stay stable across search and sort.
+    const source = standingsState === 'ready' ? standingsData : rows;
+    const strengthValues = source.map(t => t.strengthScore || 0);
+    const ptsValues = source.map(t => t.points || 0);
     const maxStrength = Math.max(...strengthValues);
     const minStrength = Math.min(...strengthValues);
     const maxPts = Math.max(...ptsValues);
@@ -504,29 +965,31 @@ function renderTable(data) {
     const strengthRange = (maxStrength - minStrength) || 1;
     const ptsRange = (maxPts - minPts) || 1;
 
-    data.forEach((team, index) => {
+    rows.forEach((team) => {
         // Main team row
         const row = document.createElement('tr');
         row.className = 'team-row';
         row.dataset.teamId = team.teamId;
         
-        const logoHtml = team.teamCrest 
-            ? `<img src="${team.teamCrest}" alt="${team.teamName}" class="team-logo" onerror="this.style.display='none'">`
-            : '<span class="team-logo-placeholder"></span>';
+        const logoHtml = crestHtml(team.teamCrest, team.teamName, team.teamCode);
+        const zone = qualificationForPosition(team.position);
         
         row.innerHTML = `
-            <td>${team.position || '-'}</td>
+            <td>
+                ${team.position || '-'}
+                <span class="zone-badge ${zone.cls}">${zone.label}</span>
+            </td>
             <td class="team-cell clickable">
                 ${logoHtml}
-                <span class="team-name">${team.teamName}</span>
+                <span class="team-name">${escapeHtml(team.teamName)}</span>
             </td>
             <td>${team.played}</td>
-            <td>${team.won}</td>
-            <td>${team.drawn}</td>
-            <td>${team.lost}</td>
-            <td>${team.gf}</td>
-            <td>${team.ga}</td>
-            <td>${team.gd > 0 ? '+' : ''}${team.gd}</td>
+            <td class="col-adv">${team.won}</td>
+            <td class="col-adv">${team.drawn}</td>
+            <td class="col-adv">${team.lost}</td>
+            <td class="col-adv">${team.gf}</td>
+            <td class="col-adv">${team.ga}</td>
+            <td class="col-adv">${team.gd > 0 ? '+' : ''}${team.gd}</td>
             <td class="pts-cell">${team.points}</td>
             <td class="clickable">${(team.solkoffCoefficient || 0).toFixed(2)}</td>
             <td class="clickable strength-score">${(team.strengthScore || 0).toFixed(2)}</td>
@@ -538,33 +1001,83 @@ function renderTable(data) {
         row.querySelector('.pts-cell').style.setProperty('--pts-pct', ptsPct);
         row.querySelector('.strength-score').style.setProperty('--strength-pct', strengthPct);
         
-        // Add click handler to team name and Solkoff cell
-        const teamCell = row.querySelector('.team-cell');
-        const solkoffCell = row.querySelector('td:nth-child(11)'); // Solkoff column (11th)
-        
-        teamCell.addEventListener('click', () => toggleTeamDetails(team.teamId));
-        solkoffCell.addEventListener('click', () => toggleTeamDetails(team.teamId));
+        // Expand/collapse on the team name, the Solkoff value, or anywhere on
+        // the row; the cells keep their clickable affordance.
+        row.addEventListener('click', () => toggleTeamDetails(team.teamId));
         
         tableBody.appendChild(row);
         
         // Add detail row if this team is expanded
-        let detailRow = null;
         if (expandedTeamId === team.teamId) {
-            detailRow = createDetailRow(team.teamId);
-            tableBody.appendChild(detailRow);
-        }
-        
-        // Add qualification line classes for 8th and 24th rows based on visual position
-        // This ensures lines stay in place regardless of sorting
-        // index is 0-based, so 8th row is index 7, 24th row is index 23
-        // If there's a detail row, put the qualification line on it; otherwise on the team row
-        const targetRow = detailRow || row;
-        if (index === 7) {
-            targetRow.classList.add('qualification-round-of-16');
-        } else if (index === 23) {
-            targetRow.classList.add('qualification-knockout');
+            tableBody.appendChild(createDetailRow(team.teamId));
         }
     });
+    wireCrestFallbacks(tableBody);
+}
+
+// Case-insensitive filter + multicolumn sort on a COPY of the raw standings;
+// the raw data is never mutated. Orders array contains {column, direction}
+// objects; when none survive, default Strength descending.
+function getVisibleStandings(data, query, orders) {
+    const term = (query || '').trim().toLowerCase();
+    let rows = Array.isArray(data) ? data.slice() : [];
+    if (term) {
+        rows = rows.filter(team => String(team.teamName || '').toLowerCase().includes(term));
+    }
+    const effective = (Array.isArray(orders) && orders.length > 0)
+        ? orders
+        : [{ column: 'strengthScore', direction: 'desc' }];
+    rows.sort((a, b) => {
+        for (const order of effective) {
+            const aVal = a[order.column] || 0;
+            const bVal = b[order.column] || 0;
+            let comparison = 0;
+            if (typeof aVal === 'string' && typeof bVal === 'string') {
+                comparison = aVal.localeCompare(bVal);
+            } else {
+                comparison = aVal - bVal;
+            }
+            if (comparison !== 0) {
+                return order.direction === 'asc' ? comparison : -comparison;
+            }
+        }
+        return 0;
+    });
+    return rows;
+}
+
+// Qualification zone comes from the OFFICIAL position, never from the current
+// sort order, so badges stay truthful while the ranking changes. No
+// zone-divider rows are inserted — they would mislead under alternate sorts.
+function qualificationForPosition(position) {
+    if (position >= 1 && position <= 8) return { cls: 'zone-direct', label: 'Direct' };
+    if (position >= 9 && position <= 24) return { cls: 'zone-playoff', label: 'Play-off' };
+    return { cls: 'zone-out', label: 'Eliminated' };
+}
+
+function visibleColumnCount() {
+    return advancedColumns ? 12 : 6;
+}
+
+// Single league rerender: filter + sort a copy, paint rows, sync header
+// indicators and the preset selector.
+function renderLeague() {
+    renderTable(getVisibleStandings(standingsData, searchQuery, sortOrders));
+    updateSortIndicators();
+    syncSortSelector();
+}
+
+// Header customization beyond a single preset descending shows 'custom'.
+function syncSortSelector() {
+    const select = document.getElementById('leagueSort');
+    if (!select) return;
+    let value = 'custom';
+    if (sortOrders.length === 1 && sortOrders[0].direction === 'desc') {
+        const preset = Object.keys(SORT_PRESETS)
+            .find(key => SORT_PRESETS[key] === sortOrders[0].column);
+        if (preset) value = preset;
+    }
+    select.value = value;
 }
 
 function createDetailRow(teamId) {
@@ -573,7 +1086,7 @@ function createDetailRow(teamId) {
     detailRow.id = `detail-${teamId}`;
     
     const detailCell = document.createElement('td');
-    detailCell.colSpan = 12; // Updated to include new Strength column
+    detailCell.colSpan = visibleColumnCount(); // adjusts with hidden advanced columns
     detailCell.className = 'detail-cell';
     detailCell.innerHTML = '<div class="detail-loading">Loading details...</div>';
     
@@ -590,32 +1103,43 @@ function createDetailRow(teamId) {
 }
 
 async function loadSolkoffDetails(teamId, detailCell) {
+    const sgen = seasonGen;
     try {
-        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details`);
+        const response = await fetch(`${API_BASE_URL}/api/teams/${teamId}/solkoff-details${seasonQuery()}`);
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const details = await response.json();
+        // A collapse or refresh re-render detaches this cell; a late response
+        // must not render into dead DOM nor poison the post-refresh cache. A
+        // season switch must not repopulate the previous season's cache either.
+        if (sgen !== seasonGen) return;
+        if (!detailCell.isConnected) return;
         solkoffDetailsCache[teamId] = details;
         renderDetailContent(detailCell, details);
     } catch (error) {
+        if (sgen !== seasonGen) return;
         console.error('Error loading Solkoff details:', error);
-        detailCell.innerHTML = `<div class="detail-error">Error loading details: ${error.message}</div>`;
+        if (!detailCell.isConnected) return;
+        detailCell.innerHTML = `<div class="detail-error">Error loading details: ${escapeHtml(error.message)}</div>`;
     }
 }
 
 function renderDetailContent(detailCell, details) {
+    const scorePerspective = `Scores shown from ${details.teamName}'s perspective`;
     const opponentsList = details.opponents.map(opp => {
-        const logoHtml = opp.teamCrest 
-            ? `<img src="${opp.teamCrest}" alt="${opp.teamName}" class="opponent-logo" onerror="this.style.display='none'">`
-            : '<span class="opponent-logo-placeholder"></span>';
+        const logoHtml = crestHtml(opp.teamCrest, opp.teamName, opp.teamCode);
         
-        // Calculate match outcomes summary
-        const wins = opp.matches ? opp.matches.filter(m => m.outcome === 'win').length : 0;
-        const draws = opp.matches ? opp.matches.filter(m => m.outcome === 'draw').length : 0;
-        const losses = opp.matches ? opp.matches.filter(m => m.outcome === 'loss').length : 0;
+        // Season W/D/L comes from the opponent's own standings row, not the
+        // head-to-head matches below. A missing count is unavailable, never a
+        // fabricated zero; real zeroes still render.
+        const seasonRecordPresent = [opp.won, opp.draw, opp.lost]
+            .every(value => value !== null && value !== undefined);
+        const seasonRecord = seasonRecordPresent
+            ? `${opp.won}W ${opp.draw}D ${opp.lost}L`
+            : 'unavailable';
         
         // Format match results
         const matchResults = opp.matches && opp.matches.length > 0
@@ -627,7 +1151,7 @@ function renderDetailContent(detailCell, details) {
                                     match.outcome === 'loss' ? 'match-loss' : 'match-draw';
                 const outcomeIcon = match.outcome === 'win' ? '✓' : 
                                    match.outcome === 'loss' ? '✗' : '=';
-                return `<span class="match-result ${outcomeClass}" title="${match.date || ''}">${scoreDisplay} ${outcomeIcon}</span>`;
+                return `<span class="match-result ${outcomeClass}" title="${escapeHtml(match.date || '')}">${scoreDisplay} ${outcomeIcon}</span>`;
             }).join(' ')
             : '';
         
@@ -635,14 +1159,14 @@ function renderDetailContent(detailCell, details) {
             <div class="opponent-item">
                 ${logoHtml}
                 <div class="opponent-main-info">
-                    <span class="opponent-name">${opp.teamName}</span>
-                    <span class="opponent-stats">${wins}W ${draws}D ${losses}L</span>
+                    <span class="opponent-name">${escapeHtml(opp.teamName)}</span>
+                    <span class="opponent-stats">Season: ${seasonRecord}</span>
                 </div>
                 <div class="opponent-matches-info">
-                    <div class="match-results">${matchResults}</div>
+                    <div class="match-results" title="${escapeHtml(scorePerspective)}">${matchResults}</div>
                     <div class="opponent-meta">
                         <span class="opponent-points">${opp.pointsPerGame ? opp.pointsPerGame.toFixed(3) : '0.000'} PPG</span>
-                        <span class="opponent-matches">${opp.matchesPlayed} match${opp.matchesPlayed !== 1 ? 'es' : ''}</span>
+                        <span class="opponent-matches">${opp.matchesPlayed} H2H match${opp.matchesPlayed !== 1 ? 'es' : ''}</span>
                     </div>
                 </div>
             </div>
@@ -669,16 +1193,16 @@ function renderDetailContent(detailCell, details) {
         <div class="detail-panel">
             <div class="detail-header">
                 <div class="detail-team-info">
-                    ${details.teamCrest ? `<img src="${details.teamCrest}" alt="${details.teamName}" class="detail-team-logo" onerror="this.style.display='none'">` : ''}
+                    ${crestHtml(details.teamCrest, details.teamName, details.teamCode)}
                     <div>
-                        <h3>${details.teamName}</h3>
+                        <h3>${escapeHtml(details.teamName)}</h3>
                         <p class="detail-subtitle">
                             Solkoff Coefficient: <strong class="solkoff-value">${(details.solkoffCoefficient || 0).toFixed(2)}</strong> • 
                             Strength Score: <strong class="strength-value">${strengthScore.toFixed(2)}</strong>
                         </p>
                     </div>
                 </div>
-                <button class="detail-close" onclick="window.toggleTeamDetails(${details.teamId})" aria-label="Close details">×</button>
+                <button type="button" class="detail-close" aria-label="Close details">×</button>
             </div>
             <div class="detail-content">
                 <div class="detail-section">
@@ -709,6 +1233,11 @@ function renderDetailContent(detailCell, details) {
             </div>
         </div>
     `;
+    wireCrestFallbacks(detailCell);
+    // Close is an attached listener (never an inline handler); the closure
+    // keeps this team's toggle so collapsing works from any expanded row.
+    const closeBtn = detailCell.querySelector('.detail-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => toggleTeamDetails(details.teamId));
 }
 
 function toggleTeamDetails(teamId) {
@@ -721,160 +1250,193 @@ function toggleTeamDetails(teamId) {
     }
     
     // Re-render table to show/hide detail row
-    applySorting();
-    renderTable(standingsData);
-    updateSortIndicators();
+    renderLeague();
 }
-
-// Make function globally accessible for onclick handlers
-window.toggleTeamDetails = toggleTeamDetails;
 
 // Play-off analysis functionality
 // Note: playoffAnalysisCache is already declared at the top of the file
 
-async function showPlayoffAnalysis(team1Id, team2Id) {
-    // Find current pair index in the list
+// ── Knockout analysis sidebar ────────────────────────────────────────────
+// Detailed pair analysis renders into the persistent #analysisPanel beside
+// the stage cards (no modal overlay, no body scroll lock). analysisRequestGen
+// invalidates late analysis responses when the stage changes, the selection
+// changes, or the panel is closed.
+
+function getAnalysisPanel() {
+    return document.getElementById('analysisPanel');
+}
+
+function findPairCard(team1Id, team2Id) {
+    const scope = document.querySelector('#knockout .tab-pane.active') || document;
+    return scope.querySelector(
+        `.playoff-pair-card[data-team1-id="${team1Id}"][data-team2-id="${team2Id}"]`) ||
+        scope.querySelector(
+            `.playoff-pair-card[data-team1-id="${team2Id}"][data-team2-id="${team1Id}"]`);
+}
+
+function markAnalysisSelection() {
+    document.querySelectorAll('#knockout .playoff-pair-card').forEach(card => {
+        const s = activeAnalysisSelection;
+        const on = !!s && (
+            (card.dataset.team1Id == s.team1Id && card.dataset.team2Id == s.team2Id) ||
+            (card.dataset.team1Id == s.team2Id && card.dataset.team2Id == s.team1Id));
+        card.classList.toggle('selected', on);
+        card.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+}
+
+function updateAnalysisPairTitle(team1Name, team2Name) {
+    const panel = getAnalysisPanel();
+    if (!panel) return;
+    const title = panel.querySelector('.analysis-pair-title');
+    if (title) {
+        title.innerHTML = `${escapeHtml(team1Name)} <span class="analysis-pair-vs">vs</span> ${escapeHtml(team2Name)}`;
+    }
+}
+
+// Clear the sidebar + selection. `invalidate` drops in-flight analysis
+// fetches; `focusCard` returns focus into the active Knockout view (used by
+// close/Escape, not by stage changes). Focus fallback chain: originating card
+// → the matching currently-rendered card (an Overview preview can open the
+// analysis before the cached pair promise has rendered any card) → the active
+// stage tab. Never a hidden Overview control, never <body>.
+function closeActiveAnalysis({ invalidate = true, focusCard = false } = {}) {
+    if (invalidate) analysisRequestGen++;
+    const selection = activeAnalysisSelection;
+    activeAnalysisSelection = null;
+    currentPairIndex = -1;
+    const panel = getAnalysisPanel();
+    if (panel) {
+        panel.hidden = true;
+        const content = panel.querySelector('.analysis-content');
+        if (content) content.innerHTML = '';
+        const title = panel.querySelector('.analysis-pair-title');
+        if (title) title.textContent = '';
+    }
+    document.querySelectorAll('#knockout .playoff-pair-card.selected').forEach(card => {
+        card.classList.remove('selected');
+        card.setAttribute('aria-selected', 'false');
+    });
+    if (focusCard) {
+        let target = (lastAnalysisCard && lastAnalysisCard.isConnected) ? lastAnalysisCard : null;
+        if (!target && selection) {
+            target = findPairCard(selection.team1Id, selection.team2Id);
+        }
+        if (!target) {
+            target = document.querySelector('#knockout .tab-btn.active');
+        }
+        if (target) target.focus();
+    }
+    lastAnalysisCard = null;
+}
+
+function closePlayoffAnalysis() {
+    closeActiveAnalysis({ invalidate: true, focusCard: true });
+}
+
+async function showPlayoffAnalysis(team1Id, team2Id, sourceCard) {
+    const gen = ++analysisRequestGen;
+    const panel = getAnalysisPanel();
+    if (!panel) return;
+
     currentPairIndex = currentPairsList.findIndex(p => 
         (p.team1.id == team1Id && p.team2.id == team2Id) || 
         (p.team1.id == team2Id && p.team2.id == team1Id)
     );
     
-    const cacheKey = `${team1Id}-${team2Id}`;
+    activeAnalysisSelection = { team1Id, team2Id };
+    lastAnalysisCard = sourceCard || findPairCard(team1Id, team2Id);
+    markAnalysisSelection();
     
-    // Check cache first
+    const pair = currentPairIndex >= 0 ? currentPairsList[currentPairIndex] : null;
+    updateAnalysisPairTitle(
+        pair ? pair.team1.name : 'Pair analysis',
+        pair ? pair.team2.name : '');
+    panel.hidden = false;
+    
+    const cacheKey = `${team1Id}-${team2Id}`;
+    const content = panel.querySelector('.analysis-content');
+    
+    // Check cache first — cached payload still passes the generation guard
+    // because a later selection/close can invalidate while rendering.
     if (playoffAnalysisCache[cacheKey]) {
-        await displayPlayoffAnalysis(playoffAnalysisCache[cacheKey], team1Id, team2Id);
+        await displayPlayoffAnalysis(playoffAnalysisCache[cacheKey], team1Id, team2Id, gen);
         return;
     }
     
     // Show loading
-    const modal = createAnalysisModal();
-    modal.querySelector('.analysis-content').innerHTML = '<div class="loading">Loading analysis...</div>';
+    content.innerHTML = '<div class="loading">Loading analysis...</div>';
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis`);
+        const response = await fetch(`${API_BASE_URL}/api/playoff-pairs/${team1Id}/${team2Id}/analysis${seasonQuery()}`);
+        if (gen !== analysisRequestGen) return; // selection/stage changed: drop late response
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const analysis = await response.json();
+        if (gen !== analysisRequestGen) return;
         playoffAnalysisCache[cacheKey] = analysis;
-        await displayPlayoffAnalysis(analysis, team1Id, team2Id);
+        await displayPlayoffAnalysis(analysis, team1Id, team2Id, gen);
     } catch (error) {
+        if (gen !== analysisRequestGen) return;
         console.error('Error loading play-off analysis:', error);
-        const modal = document.getElementById('playoffAnalysisModal');
-        if (modal) {
-            modal.querySelector('.analysis-content').innerHTML = 
-                `<div class="error">Error loading analysis: ${error.message}</div>`;
+        const livePanel = getAnalysisPanel();
+        if (livePanel && !livePanel.hidden) {
+            const liveContent = livePanel.querySelector('.analysis-content');
+            // Failure is never cached; the next open retries.
+            liveContent.innerHTML = `
+                <div class="analysis-error" role="alert">
+                    <p>Analysis unavailable — could not load this match.</p>
+                    <p class="analysis-error-detail">${escapeHtml(error.message)}</p>
+                </div>`;
         }
     }
 }
 
-function createAnalysisModal() {
-    let modal = document.getElementById('playoffAnalysisModal');
-    
-    // If modal exists but doesn't have the structure, create it
-    if (modal) {
-        // Check if modal already has the structure
-        if (!modal.querySelector('.analysis-content')) {
-            modal.className = 'playoff-modal';
-            modal.innerHTML = `
-                <div class="modal-overlay" onclick="closePlayoffAnalysis()"></div>
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h2>Historical Analysis</h2>
-                        <button class="modal-close" onclick="closePlayoffAnalysis()">×</button>
-                    </div>
-                    <div class="analysis-content"></div>
-                </div>
-            `;
-        }
-        // Make sure modal is visible
-        modal.style.display = 'block';
-        
-        // Add keyboard navigation if not already added
-        if (!modal._keyHandler) {
-            const handleKeyPress = (e) => {
-                if (modal.style.display === 'none' || !modal.classList.contains('playoff-modal')) {
-                    return;
-                }
-                
-                if (e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    if (currentPairIndex > 0) {
-                        navigateToPair(currentPairIndex - 1);
-                    }
-                } else if (e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    if (currentPairIndex >= 0 && currentPairIndex < currentPairsList.length - 1) {
-                        navigateToPair(currentPairIndex + 1);
-                    }
-                } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    closePlayoffAnalysis();
-                }
-            };
-            modal._keyHandler = handleKeyPress;
-            document.addEventListener('keydown', handleKeyPress);
-        }
-        
-        return modal;
+// Sidebar wiring: labelled close button + arrow/Escape keys scoped to the
+// knockout section. Tab controls and form fields keep their own keys —
+// closest('[role="tab"]') bails out before anything is prevented.
+function initializeKnockoutSidebar() {
+    const panel = getAnalysisPanel();
+    if (panel) {
+        const closeBtn = panel.querySelector('.analysis-close');
+        if (closeBtn) closeBtn.addEventListener('click', closePlayoffAnalysis);
     }
     
-    // Create new modal if it doesn't exist
-    modal = document.createElement('div');
-    modal.id = 'playoffAnalysisModal';
-    modal.className = 'playoff-modal';
-    modal.innerHTML = `
-        <div class="modal-overlay" onclick="closePlayoffAnalysis()"></div>
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Historical Analysis</h2>
-                <button class="modal-close" onclick="closePlayoffAnalysis()">×</button>
-            </div>
-            <div class="analysis-content"></div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    
-    // Add keyboard navigation (arrow keys)
-    const handleKeyPress = (e) => {
-        if (modal.style.display === 'none' || !modal.classList.contains('playoff-modal')) {
-            return;
+    const knockout = document.getElementById('knockout');
+    if (!knockout) return;
+    knockout.addEventListener('keydown', (e) => {
+        const target = e.target;
+        if (target && target.closest && target.closest('[role="tab"], input, select, textarea')) {
+            return; // stage tabs and form controls own their arrow keys
         }
-        
-        if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            if (currentPairIndex > 0) {
-                navigateToPair(currentPairIndex - 1);
-            }
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
+        if (!activeAnalysisSelection) return;
+        if (e.key === 'ArrowRight') {
             if (currentPairIndex >= 0 && currentPairIndex < currentPairsList.length - 1) {
+                e.preventDefault();
                 navigateToPair(currentPairIndex + 1);
+            }
+        } else if (e.key === 'ArrowLeft') {
+            if (currentPairIndex > 0) {
+                e.preventDefault();
+                navigateToPair(currentPairIndex - 1);
             }
         } else if (e.key === 'Escape') {
             e.preventDefault();
             closePlayoffAnalysis();
         }
-    };
-    
-    // Remove old listener if exists
-    document.removeEventListener('keydown', modal._keyHandler);
-    // Add new listener
-    modal._keyHandler = handleKeyPress;
-    document.addEventListener('keydown', handleKeyPress);
-    
-    return modal;
+    });
 }
 
-async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
-    const modal = createAnalysisModal();
-    const content = modal.querySelector('.analysis-content');
+async function displayPlayoffAnalysis(analysis, team1Id, team2Id, gen) {
+    const panel = getAnalysisPanel();
+    if (!panel) return;
+    const content = panel.querySelector('.analysis-content');
     
     if (!content) {
-        console.error('Analysis content element not found in modal');
+        console.error('Analysis content element not found in panel');
         return;
     }
     
@@ -888,9 +1450,12 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
     
     const team1 = analysis.team1;
     const team2 = analysis.team2;
+    updateAnalysisPairTitle(team1.name, team2.name);
     const leagueTable = analysis.leagueTable;
     const fullLeagueTable = leagueTable.fullLeagueTable || [];
-    const winProbability = leagueTable.winProbability || {team1Win: 0.5, team2Win: 0.5, draw: 0.0};
+    // Missing probability stays null (rendered as unavailable), never a fake 50/50.
+    const winProbability = leagueTable.winProbability || null;
+    const isEloMethod = !!winProbability && winProbability.method === 'elo';
     
     // Find positions of team1 and team2 in the MAIN UCL league table (not the historical mini-table)
     // Get position from standingsData which contains the current season's league table
@@ -928,7 +1493,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         // standingsData not loaded yet, try to load it
         console.log('standingsData not available, attempting to load...');
         try {
-            const response = await fetch(`${API_BASE_URL}/api/standings`);
+            const response = await fetch(`${API_BASE_URL}/api/standings${seasonQuery()}`);
             if (response.ok) {
                 const loadedStandings = await response.json();
                 const team1MainStanding = loadedStandings.find(t => {
@@ -965,13 +1530,17 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
     const winnerClass1 = winner === 1 ? 'winner' : '';
     const winnerClass2 = winner === 2 ? 'winner' : '';
     
-    // Format win probability - normalize excluding draws to ensure they sum to 100%
-    const winTotal = (winProbability.team1Win || 0) + (winProbability.team2Win || 0);
-    const normalizedTeam1 = winTotal > 0 ? (winProbability.team1Win || 0) / winTotal : 0.5;
-    const normalizedTeam2 = winTotal > 0 ? (winProbability.team2Win || 0) / winTotal : 0.5;
-    
-    const team1WinPercent = (normalizedTeam1 * 100).toFixed(1);
-    const team2WinPercent = (normalizedTeam2 * 100).toFixed(1);
+    // Format win probability - normalize excluding draws so they sum to 100%.
+    // Default/no-signal methods and zero totals yield null → "unavailable".
+    const probNorm = normalizeWinProbability(winProbability);
+    const methodSlug = winProbability && winProbability.method
+        ? ` (method: ${escapeHtml(String(winProbability.method).replace(/_/g, ' '))})`
+        : '';
+    // Default/no-signal methods never yield displayed probabilities; their
+    // honest "why nothing is shown" explanation belongs on the unavailable
+    // branch, not next to bars that only genuine methods reach.
+    const isDefaultProbMethod = !!winProbability &&
+        EXCLUDED_PROB_METHODS.some(m => String(winProbability.method || '').toLowerCase().includes(m));
     
     // Extract direct matches between team1 and team2
     const team1Data = fullLeagueTable.find(t => t.teamId === team1.id);
@@ -1001,7 +1570,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         return new Date(b.date) - new Date(a.date);
     });
     
-    // Navigation buttons
+    // Navigation buttons: accessible labels, disabled at bounds, wired after
+    // render (never inline handlers inside Knockout).
     const hasPrevious = currentPairIndex > 0;
     const hasNext = currentPairIndex >= 0 && currentPairIndex < currentPairsList.length - 1;
     const pairNumber = currentPairIndex >= 0 ? currentPairIndex + 1 : 0;
@@ -1009,12 +1579,14 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
     
     const navButtons = totalPairs > 1 ? `
         <div class="analysis-navigation">
-            <button class="nav-btn nav-prev" ${!hasPrevious ? 'disabled' : ''} onclick="navigateToPair(${currentPairIndex - 1})" title="Previous pair">
-                <span>‹</span>
+            <button type="button" class="nav-btn nav-prev" data-index="${currentPairIndex - 1}"
+                    ${!hasPrevious ? 'disabled' : ''} aria-label="Previous pair" title="Previous pair">
+                <span aria-hidden="true">‹</span>
             </button>
             <span class="pair-counter">${pairNumber} / ${totalPairs}</span>
-            <button class="nav-btn nav-next" ${!hasNext ? 'disabled' : ''} onclick="navigateToPair(${currentPairIndex + 1})" title="Next pair">
-                <span>›</span>
+            <button type="button" class="nav-btn nav-next" data-index="${currentPairIndex + 1}"
+                    ${!hasNext ? 'disabled' : ''} aria-label="Next pair" title="Next pair">
+                <span aria-hidden="true">›</span>
             </button>
         </div>
     ` : '';
@@ -1022,7 +1594,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
     // Build direct matches HTML
     const directMatchesHtml = directMatches.length > 0 ? `
         <div class="direct-matches-section">
-            <h3>Direct Matches: ${team1.name} vs ${team2.name}</h3>
+            <h3>Direct Matches: ${escapeHtml(team1.name)} vs ${escapeHtml(team2.name)}</h3>
             <div class="direct-matches-list">
                 ${directMatches.map(match => {
                     const outcomeClass = match.outcome === 'win' ? 'match-win' : 
@@ -1040,16 +1612,16 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                         <div class="direct-match-item ${outcomeClass}">
                             <div class="direct-match-teams">
                                 <div class="direct-match-team">
-                                    ${homeCrest ? `<img src="${homeCrest}" alt="${homeTeam}" class="direct-match-logo" onerror="this.style.display='none'">` : ''}
-                                    <span class="direct-match-team-name">${homeTeam}</span>
+                                    ${crestHtml(homeCrest, homeTeam)}
+                                    <span class="direct-match-team-name">${escapeHtml(homeTeam)}</span>
                                 </div>
                                 <div class="direct-match-score">
                                     <span class="score">${homeScore}-${awayScore}</span>
                                     <span class="match-outcome-icon">${outcomeIcon}</span>
                                 </div>
                                 <div class="direct-match-team">
-                                    ${awayCrest ? `<img src="${awayCrest}" alt="${awayTeam}" class="direct-match-logo" onerror="this.style.display='none'">` : ''}
-                                    <span class="direct-match-team-name">${awayTeam}</span>
+                                    ${crestHtml(awayCrest, awayTeam)}
+                                    <span class="direct-match-team-name">${escapeHtml(awayTeam)}</span>
                                 </div>
                             </div>
                             <div class="direct-match-meta">
@@ -1063,14 +1635,14 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         </div>
     ` : `
         <div class="direct-matches-section">
-            <h3>Direct Matches: ${team1.name} vs ${team2.name}</h3>
+            <h3>Direct Matches: ${escapeHtml(team1.name)} vs ${escapeHtml(team2.name)}</h3>
             <p class="no-direct-matches">No direct matches found between these teams in the historical data.</p>
         </div>
     `;
     
     // Build Elo breakdown section (shown when method is 'elo')
     let eloSectionHtml = '';
-    if (winProbability.method === 'elo') {
+    if (isEloMethod) {
         const r1 = winProbability.team1EloRating || 1500;
         const r2 = winProbability.team2EloRating || 1500;
         const m1 = winProbability.team1MatchesPlayed || 0;
@@ -1104,13 +1676,13 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
             if (!s || !s.notableWins || s.notableWins.length === 0) return '';
             const rows = s.notableWins.map(w => `
                 <tr>
-                    <td>${w.date || '—'}</td>
-                    <td>${w.opponent}</td>
-                    <td class="score-cell">${w.score}</td>
+                    <td>${escapeHtml(w.date || '—')}</td>
+                    <td>${escapeHtml(w.opponent)}</td>
+                    <td class="score-cell">${escapeHtml(w.score)}</td>
                 </tr>`).join('');
             return `
                 <div class="notable-wins">
-                    <h5>${name} — Biggest wins</h5>
+                    <h5>${escapeHtml(name)} — Biggest wins</h5>
                     <table class="notable-wins-table">
                         <thead><tr><th>Date</th><th>Opponent</th><th>Score</th></tr></thead>
                         <tbody>${rows}</tbody>
@@ -1123,8 +1695,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                 <h3>Elo Rating Breakdown</h3>
                 <div class="elo-rating-comparison">
                     <div class="elo-team-card">
-                        ${team1.crest ? `<img src="${team1.crest}" alt="${team1.name}" class="elo-team-logo" onerror="this.style.display='none'">` : ''}
-                        <div class="elo-team-name">${team1.name}</div>
+                        ${crestHtml(team1.crest, team1.name)}
+                        <div class="elo-team-name">${escapeHtml(team1.name)}</div>
                         <div class="elo-rating-value">${r1.toFixed(0)}</div>
                         <div class="elo-matches-played">${m1} matches</div>
                         ${eloStatsRow(s1)}
@@ -1135,8 +1707,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                         <div class="elo-divider-label">Elo gap</div>
                     </div>
                     <div class="elo-team-card">
-                        ${team2.crest ? `<img src="${team2.crest}" alt="${team2.name}" class="elo-team-logo" onerror="this.style.display='none'">` : ''}
-                        <div class="elo-team-name">${team2.name}</div>
+                        ${crestHtml(team2.crest, team2.name)}
+                        <div class="elo-team-name">${escapeHtml(team2.name)}</div>
                         <div class="elo-rating-value">${r2.toFixed(0)}</div>
                         <div class="elo-matches-played">${m2} matches</div>
                         ${eloStatsRow(s2)}
@@ -1150,14 +1722,14 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                 </div>
 
                 <div class="elo-formula-breakdown">
-                    <h4>Step-by-step calculation (neutral ground, ${team1.name} perspective)</h4>
+                    <h4>Step-by-step calculation (neutral ground, ${escapeHtml(team1.name)} perspective)</h4>
                     <div class="formula-steps">
                         <div class="formula-step">ΔElo = R₂ − R₁ = ${r2.toFixed(0)} − ${r1.toFixed(0)} = ${delta.toFixed(0)}</div>
-                        <div class="formula-step">P(${team1.name}) = 1 / (1 + 10^(ΔElo / 400))</div>
+                        <div class="formula-step">P(${escapeHtml(team1.name)}) = 1 / (1 + 10^(ΔElo / 400))</div>
                         <div class="formula-step">= 1 / (1 + 10^(${delta.toFixed(0)} / 400))</div>
                         <div class="formula-step">= 1 / (1 + 10^${exponent.toFixed(4)})</div>
                         <div class="formula-step">= 1 / (1 + ${power.toFixed(4)})</div>
-                        <div class="formula-step result">= <strong>${(p1 * 100).toFixed(1)}%</strong> &nbsp;·&nbsp; P(${team2.name}) = 1 − ${(p1 * 100).toFixed(1)}% = <strong>${(p2 * 100).toFixed(1)}%</strong></div>
+                        <div class="formula-step result">= <strong>${(p1 * 100).toFixed(1)}%</strong> &nbsp;·&nbsp; P(${escapeHtml(team2.name)}) = 1 − ${(p1 * 100).toFixed(1)}% = <strong>${(p2 * 100).toFixed(1)}%</strong></div>
                     </div>
                 </div>
 
@@ -1171,52 +1743,60 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         `;
     }
 
+    // Late guard: a newer selection, stage change or close may have landed
+    // while positions/standings were still resolving — never overwrite then.
+    if (gen !== undefined && gen !== analysisRequestGen) return;
+    panel.hidden = false;
+    
     content.innerHTML = `
         ${navButtons}
         <div class="analysis-header">
             <div class="analysis-team ${winnerClass1}">
-                ${team1.crest ? `<img src="${team1.crest}" alt="${team1.name}" class="analysis-team-logo">` : ''}
-                <h3>${team1.name}</h3>
-                ${team1Position !== null ? `<span class="league-position" title="Position in current UCL league table">#${team1Position}</span>` : ''}
+                ${crestHtml(team1.crest, team1.name)}
+                <h3>${escapeHtml(team1.name)}</h3>
+                ${team1Position !== null ? `<span class="league-position" title="${escapeHtml(leaguePositionTitle())}">#${team1Position}</span>` : ''}
             </div>
             <div class="analysis-vs">vs</div>
             <div class="analysis-team ${winnerClass2}">
-                ${team2.crest ? `<img src="${team2.crest}" alt="${team2.name}" class="analysis-team-logo">` : ''}
-                <h3>${team2.name}</h3>
-                ${team2Position !== null ? `<span class="league-position" title="Position in current UCL league table">#${team2Position}</span>` : ''}
+                ${crestHtml(team2.crest, team2.name)}
+                <h3>${escapeHtml(team2.name)}</h3>
+                ${team2Position !== null ? `<span class="league-position" title="${escapeHtml(leaguePositionTitle())}">#${team2Position}</span>` : ''}
             </div>
         </div>
         
         ${directMatchesHtml}
         
         <div class="win-probability">
-            <h3>Win Probability</h3>
+            <h3>Win Probability <span class="win-prob-scope">— excluding draws</span></h3>
+            ${probNorm ? `
             <div class="probability-bars">
                 <div class="probability-item">
                     <div class="probability-label">
-                        <span>${team1.name}</span>
-                        <span class="probability-value">${team1WinPercent}%</span>
+                        <span>${escapeHtml(team1.name)}</span>
+                        <span class="probability-value">${(probNorm.team1 * 100).toFixed(1)}%</span>
                     </div>
                     <div class="probability-bar">
-                        <div class="probability-fill team1-fill" style="width: ${team1WinPercent}%"></div>
+                        <div class="probability-fill team1-fill" style="width: ${(probNorm.team1 * 100).toFixed(1)}%"></div>
                     </div>
                 </div>
                 <div class="probability-item">
                     <div class="probability-label">
-                        <span>${team2.name}</span>
-                        <span class="probability-value">${team2WinPercent}%</span>
+                        <span>${escapeHtml(team2.name)}</span>
+                        <span class="probability-value">${(probNorm.team2 * 100).toFixed(1)}%</span>
                     </div>
                     <div class="probability-bar">
-                        <div class="probability-fill team2-fill" style="width: ${team2WinPercent}%"></div>
+                        <div class="probability-fill team2-fill" style="width: ${(probNorm.team2 * 100).toFixed(1)}%"></div>
                     </div>
                 </div>
             </div>
-            ${getProbabilityExplanation(winProbability, team1.name, team2.name)}
+            ${getProbabilityExplanation(winProbability, team1.name, team2.name)}` : `
+            <p class="probability-unavailable">No meaningful win probability available${methodSlug}.</p>
+            ${isDefaultProbMethod ? getProbabilityExplanation(winProbability, team1.name, team2.name) : ''}`}
         </div>
         
         ${eloSectionHtml}
 
-        ${winProbability.method !== 'elo' ? `
+        ${!isEloMethod ? `
         <div class="analysis-info">
             <p><strong>Teams in League:</strong> ${fullLeagueTable.length}</p>
             <p><strong>Common Opponents:</strong> ${analysis.commonOpponentsCount}</p>
@@ -1224,7 +1804,7 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
             ${analysis.commonOpponentsCount === 0 ? '<p class="warning">No common opponents found in the historical data.</p>' : ''}
         </div>` : ''}
 
-        ${fullLeagueTable.length > 0 && winProbability.method !== 'elo' ? `
+        ${fullLeagueTable.length > 0 && !isEloMethod ? `
         <div class="league-table-container">
             <h3>Full League Table (All Matches Between Involved Teams)</h3>
             <p class="table-note">Ranked by: Points % → Solkoff → Strength per Game → Goals For</p>
@@ -1257,8 +1837,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                             <tr class="${rowClass} ${highlightClass}" data-team-id="${team.teamId}">
                                 <td>${index + 1}</td>
                                 <td class="team-cell">
-                                    ${team.teamCrest ? `<img src="${team.teamCrest}" alt="${team.teamName}" class="table-team-logo">` : ''}
-                                    ${isTeam1 || isTeam2 ? '<strong>' : ''}${team.teamName}${isTeam1 || isTeam2 ? '</strong>' : ''}
+                                    ${crestHtml(team.teamCrest, team.teamName)}
+                                    ${isTeam1 || isTeam2 ? '<strong>' : ''}${escapeHtml(team.teamName)}${isTeam1 || isTeam2 ? '</strong>' : ''}
                                 </td>
                                 <td>${team.played}</td>
                                 <td>${team.won}</td>
@@ -1328,14 +1908,11 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                                                 match.outcome === 'loss' ? 'match-loss' : 'match-draw';
                             const outcomeIcon = match.outcome === 'win' ? '✓' : 
                                                match.outcome === 'loss' ? '✗' : '=';
-                            const opponentCrest = match.opponentCrest 
-                                ? `<img src="${match.opponentCrest}" alt="${match.opponentName}" class="match-opponent-logo" onerror="this.style.display='none'">`
-                                : '<span class="match-opponent-logo-placeholder"></span>';
                             
                             return `
                                 <div class="match-item ${outcomeClass}">
-                                    ${opponentCrest}
-                                    <span class="match-opponent">${match.opponentName}</span>
+                                    ${crestHtml(match.opponentCrest, match.opponentName)}
+                                    <span class="match-opponent">${escapeHtml(match.opponentName)}</span>
                                     <span class="match-score">${match.teamScore}-${match.opponentScore}</span>
                                     <span class="match-outcome">${outcomeIcon}</span>
                                     <span class="match-date">${match.date ? new Date(match.date).toLocaleDateString() : ''}</span>
@@ -1346,8 +1923,8 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
                         return `
                             <div class="team-matches ${isPlayoffTeam ? 'playoff-team-matches' : ''}">
                                 <h4 class="team-matches-header">
-                                    ${team.teamCrest ? `<img src="${team.teamCrest}" alt="${team.teamName}" class="team-matches-logo">` : ''}
-                                    <strong>${team.teamName}</strong> (${otherMatches.length} match${otherMatches.length !== 1 ? 'es' : ''})
+                                    ${crestHtml(team.teamCrest, team.teamName)}
+                                    <strong>${escapeHtml(team.teamName)}</strong> (${otherMatches.length} match${otherMatches.length !== 1 ? 'es' : ''})
                                 </h4>
                                 <div class="matches-list">
                                     ${matchesList}
@@ -1362,24 +1939,19 @@ async function displayPlayoffAnalysis(analysis, team1Id, team2Id) {
         ` : ''}
     `;
     
-    modal.style.display = 'block';
-}
-
-function closePlayoffAnalysis() {
-    const modal = document.getElementById('playoffAnalysisModal');
-    if (modal) {
-        modal.style.display = 'none';
-        // Remove keyboard listener when modal is closed
-        if (modal._keyHandler) {
-            document.removeEventListener('keydown', modal._keyHandler);
-            modal._keyHandler = null;
-        }
-    }
+    wireCrestFallbacks(content);
+    // Nav buttons carry data-index only; listeners attached after every render.
+    content.querySelectorAll('.nav-prev, .nav-next').forEach(btn => {
+        btn.addEventListener('click', () => navigateToPair(Number(btn.dataset.index)));
+    });
 }
 
 // Make functions globally accessible
 // Helper function to generate probability explanation
 function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Name = 'Team 2') {
+    // API-derived names are inert text; escape once up front (no value changes).
+    team1Name = escapeHtml(team1Name);
+    team2Name = escapeHtml(team2Name);
     const method = winProbability.method || 'unknown';
     let explanation = '';
     
@@ -1470,16 +2042,52 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
             `;
             break;
         }
-        case 'equal_strength':
-        case 'no_data':
-        case 'insufficient_data':
+        case 'historical_no_data':
             explanation = `
                 <div class="probability-explanation">
-                    <h4>How this probability is calculated:</h4>
-                    <p><strong>Method: Default/Equal Probability</strong></p>
-                    <p>Insufficient historical data is available to calculate a meaningful probability. 
-                    The probabilities shown are equal (50% each team) as a default.</p>
-                    <p class="probability-note">Draws are excluded from the calculation. Probabilities are normalized to sum to exactly 100%.</p>
+                    <h4>Why no win probability is shown:</h4>
+                    <p><strong>Method: historical archive</strong></p>
+                    <p>Win probability is unavailable for archived seasons. Elo and
+                    live strength ratings are built from present-day data, so using
+                    them here would leak results that happened after this season into
+                    its prediction. No estimate is shown rather than a misleading one.</p>
+                </div>
+            `;
+            break;
+        case 'equal_strength':
+        case 'default':
+        case 'no_data':
+        case 'insufficient_data':
+            // Nothing is rendered as a prediction for these methods, so the
+            // explanation says so honestly — no claim of shown equal values.
+            explanation = `
+                <div class="probability-explanation">
+                    <h4>Why no win probability is shown:</h4>
+                    <p><strong>Method: ${escapeHtml(method)}</strong></p>
+                    <p>Insufficient historical data is available to calculate a meaningful
+                    probability. No prediction is displayed: inventing an equal split would
+                    be fake, so this match's win probability is reported as unavailable.</p>
+                </div>
+            `;
+            break;
+        case 'no_common_opponents':
+            explanation = `
+                <div class="probability-explanation">
+                    <h4>Why no win probability is shown:</h4>
+                    <p><strong>Method: ${escapeHtml(method)}</strong></p>
+                    <p>No common opponents were found in the historical data, so there is
+                    no basis for a probability. It is reported as unavailable rather than
+                    guessed.</p>
+                </div>
+            `;
+            break;
+        case 'error':
+            explanation = `
+                <div class="probability-explanation">
+                    <h4>Why no win probability is shown:</h4>
+                    <p><strong>Method: ${escapeHtml(method)}</strong></p>
+                    <p>The probability calculation failed, so no prediction is shown for
+                    this match. It is reported as unavailable.</p>
                 </div>
             `;
             break;
@@ -1487,7 +2095,7 @@ function getProbabilityExplanation(winProbability, team1Name = 'Team 1', team2Na
             explanation = `
                 <div class="probability-explanation">
                     <h4>How this probability is calculated:</h4>
-                    <p><strong>Method: ${method}</strong></p>
+                    <p><strong>Method: ${escapeHtml(method)}</strong></p>
                     <p>This probability is calculated based on historical match data and team performance metrics.</p>
                     <p class="probability-note">Draws are excluded from the calculation. Probabilities are normalized to sum to exactly 100%.</p>
                 </div>
@@ -1505,6 +2113,12 @@ async function navigateToPair(index) {
     const pair = currentPairsList[index];
     if (pair && pair.team1 && pair.team2) {
         await showPlayoffAnalysis(pair.team1.id, pair.team2.id);
+        // Move the selection (and focus for chained keyboard navigation).
+        const card = findPairCard(pair.team1.id, pair.team2.id);
+        if (card) {
+            lastAnalysisCard = card;
+            card.focus();
+        }
     }
 }
 
@@ -1568,9 +2182,7 @@ function addSortOrder(columnIndex) {
         }
     }
     
-    applySorting();
-    renderTable(standingsData);
-    updateSortIndicators();
+    renderLeague();
 }
 
 function removeSortOrder(columnIndex) {
@@ -1588,32 +2200,8 @@ function removeSortOrder(columnIndex) {
             ];
         }
         
-        applySorting();
-        renderTable(standingsData);
-        updateSortIndicators();
+        renderLeague();
     }
-}
-
-function applySorting() {
-    // Sort data using all sort orders
-    standingsData.sort((a, b) => {
-        for (const order of sortOrders) {
-            const aVal = a[order.column] || 0;
-            const bVal = b[order.column] || 0;
-            
-            let comparison = 0;
-            if (typeof aVal === 'string' && typeof bVal === 'string') {
-                comparison = aVal.localeCompare(bVal);
-            } else {
-                comparison = aVal - bVal;
-            }
-            
-            if (comparison !== 0) {
-                return order.direction === 'asc' ? comparison : -comparison;
-            }
-        }
-        return 0; // All sort criteria are equal
-    });
 }
 
 function updateSortIndicators() {
@@ -1653,39 +2241,90 @@ function updateSortIndicators() {
     });
 }
 
+// App-level inline failure/status (role="alert" region outside the view
+// panels). The legacy #error lives inside the League panel and is invisible
+// while Overview/Knockout is active, so failures must also land here.
+function setAppStatus(message) {
+    const el = document.getElementById('appStatus');
+    if (!el) return;
+    el.textContent = message;
+    el.hidden = false;
+}
+
+function clearAppStatus() {
+    const el = document.getElementById('appStatus');
+    if (!el) return;
+    el.textContent = '';
+    el.hidden = true;
+}
+
+// Only one reload cycle at a time: clicks during the reload window are
+// ignored (the disabled button plus this flag guard against concurrency).
+let refreshInFlight = false;
+
+// Public "Reload data": re-reads already-stored standings/pairs over GET only.
+// It never issues a POST and never calls /api/refresh, so the browser cannot
+// trigger server-side data collection; scheduled updates run separately.
 async function refreshData() {
+    if (refreshInFlight) return;
     const btn = document.getElementById('refreshBtn');
+    if (!btn) return;
+    refreshInFlight = true;
     btn.disabled = true;
-    btn.textContent = 'Refreshing...';
-    
+    btn.textContent = 'Reloading...';
+
     try {
-        const response = await fetch(`${API_BASE_URL}/api/refresh`, {
-            method: 'POST'
-        });
-        
-        if (!response.ok) {
-            throw new Error('Refresh failed');
+        // Drop every cached payload so post-reload views can never replay
+        // pre-reload data. closeActiveAnalysis bumps analysisRequestGen, so
+        // in-flight analysis responses are discarded and no stale
+        // selection/panel content survives as if current. The existing raw
+        // data is kept on screen until the re-read replaces it; a failure below
+        // never claims freshness.
+        solkoffDetailsCache = {};
+        playoffAnalysisCache = {};
+        pairsByStage = {};
+        closeActiveAnalysis({ invalidate: true, focusCard: false });
+
+        // Re-read once each via the shared GET loaders. Generation counters
+        // inside the loaders supersede pre-reload pending responses; the shared
+        // pairs cache means the Overview preview and the selected Knockout stage
+        // never fetch the same stage twice. Search/sort/advanced/expanded state
+        // live in module variables, so the re-render preserves them. The
+        // "Standings loaded at" timestamp is written only by a successful
+        // standings fetch.
+        await loadStandings();
+        await loadOverviewKnockout();
+        if (currentRoute.view === 'knockout' && currentRoute.stage) {
+            await loadKnockoutPairs(stageKeyForTab(currentRoute.stage), currentRoute.stage);
         }
-        
-        // Wait a moment for data to update, then reload
-        setTimeout(() => {
-            loadStandings();
-            btn.disabled = false;
-            btn.textContent = 'Refresh Data';
-        }, 1000);
-        
+
     } catch (error) {
-        console.error('Error refreshing data:', error);
+        // Inline failure only — never alert(), never wipe valid data. League
+        // view keeps its legacy #error surface; every other view gets the
+        // global status region so a failure is never hidden away in a panel
+        // the user cannot see. The copy refers to reloading stored data, not a
+        // forced upstream update.
+        console.error('Error reloading data:', error);
+        const message = 'Reload failed — stored data was not updated. Please try again.';
+        const leaguePanel = document.getElementById('league');
+        const errorEl = document.getElementById('error');
+        if (leaguePanel && !leaguePanel.hidden && errorEl) {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+        } else {
+            setAppStatus(message);
+        }
+    } finally {
+        refreshInFlight = false;
         btn.disabled = false;
-        btn.textContent = 'Refresh Data';
-        alert('Error refreshing data. Please try again.');
+        btn.textContent = 'Reload data';
     }
 }
 
 function updateLastUpdated() {
     const lastUpdatedEl = document.getElementById('lastUpdated');
     const now = new Date();
-    lastUpdatedEl.textContent = `Last updated: ${now.toLocaleTimeString()}`;
+    lastUpdatedEl.textContent = `Standings loaded at ${now.toLocaleTimeString()}`;
 }
 
 // ── Intro banner ──────────────────────────────────────────────────────────────
@@ -1707,7 +2346,278 @@ function renderSkeletonRows(count) {
     const widths = ['20px', '140px', '24px', '24px', '24px', '24px', '28px', '28px', '32px', '32px', '48px', '48px'];
     return Array.from({length: count}, () =>
         `<tr class="skeleton-row" aria-hidden="true">` +
-        widths.map(w => `<td><span class="skeleton-cell" style="width:${w}"></span></td>`).join('') +
+        widths.map((w, i) => {
+            const adv = (i >= 3 && i <= 8) ? ' class="col-adv"' : '';
+            return `<td${adv}><span class="skeleton-cell" style="width:${w}"></span></td>`;
+        }).join('') +
         `</tr>`
     ).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Overview (UCL Strength Lab) — shared helpers + data-only rendering
+// ---------------------------------------------------------------------------
+
+// All API-derived text is inserted as escaped, inert content.
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+}
+
+// Crest images are only allowed over HTTP(S); unsafe schemes fall back to initials.
+function safeCrestUrl(url) {
+    return typeof url === 'string' && /^https?:\/\//i.test(url.trim()) ? url.trim() : null;
+}
+
+function crestFallbackText(name, code) {
+    if (code) return String(code).trim().slice(0, 3).toUpperCase();
+    const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+    const initials = words.slice(0, 3).map(w => w[0]).join('');
+    return (initials || String(name || '?').trim().slice(0, 3)).toUpperCase();
+}
+
+// Real crest when a safe URL exists, initials otherwise. Broken images are
+// swapped to initials by wireCrestFallbacks (no inline handlers added).
+function crestHtml(crest, name, code) {
+    const fallback = escapeHtml(crestFallbackText(name, code));
+    const url = safeCrestUrl(crest);
+    if (!url) {
+        return `<span class="crest-initials crest-placeholder" aria-hidden="true">${fallback}</span>`;
+    }
+    return `<img class="crest" src="${escapeHtml(url)}" alt="" data-fallback="${fallback}">`;
+}
+
+function wireCrestFallbacks(root) {
+    root.querySelectorAll('img.crest[data-fallback]').forEach(img => {
+        img.addEventListener('error', () => {
+            const span = document.createElement('span');
+            span.className = 'crest-initials crest-placeholder';
+            span.setAttribute('aria-hidden', 'true');
+            span.textContent = img.dataset.fallback;
+            img.replaceWith(span);
+        }, { once: true });
+    });
+}
+
+// Normalized two-team win fractions excluding draws. null when the probability
+// is missing, comes from a default/no-signal method, or the win total is zero —
+// callers must show "unavailable" and never invent or present a fake 50/50.
+function normalizeWinProbability(probability) {
+    if (!probability) return null;
+    const method = String(probability.method || '').toLowerCase();
+    if (EXCLUDED_PROB_METHODS.some(m => method.includes(m))) return null;
+    const t1 = Number(probability.team1Win) || 0;
+    const t2 = Number(probability.team2Win) || 0;
+    const total = t1 + t2;
+    if (!(total > 0)) return null;
+    return { team1: t1 / total, team2: t2 / total };
+}
+
+// Backend default/no-signal methods (see backend/playoff_analyzer.py): these
+// emit flat 0.5/0.5 placeholders and must never be treated as predictions —
+// neither in balanced-tie selection nor in any displayed probability.
+const EXCLUDED_PROB_METHODS = ['no_data', 'no_common_opponents', 'default',
+                               'equal', 'insufficient', 'error'];
+
+function isMeaningfulProbability(probability) {
+    return normalizeWinProbability(probability) !== null;
+}
+
+function findMostBalancedTie(pairs) {
+    let best = null;
+    let bestGap = Infinity;
+    (pairs || []).forEach(pair => {
+        if (!isMeaningfulProbability(pair.winProbability)) return;
+        const norm = normalizeWinProbability(pair.winProbability);
+        const gap = Math.abs(norm.team1 - norm.team2);
+        if (gap < bestGap) { bestGap = gap; best = pair; }
+    });
+    return best;
+}
+
+function buildOverviewSummary(standings, pairs) {
+    let strongest = null;
+    let toughest = null;
+    (Array.isArray(standings) ? standings : []).forEach(team => {
+        if (!strongest || Number(team.strengthScore) > Number(strongest.strengthScore)) strongest = team;
+        if (!toughest || Number(team.solkoffCoefficient) > Number(toughest.solkoffCoefficient)) toughest = team;
+    });
+    return { strongest, toughest, balancedTie: findMostBalancedTie(pairs) };
+}
+
+// Standings and pair previews load independently; each keeps its own explicit
+// loading/empty/error state. Generation counters drop stale async writes.
+let standingsState = 'loading'; // loading|ready|empty|error
+let standingsGen = 0;
+let overviewPairs = null;
+let overviewPairsStage = 'ROUND_OF_16'; // API stage key the preview set was fetched for
+let pairsState = 'loading'; // loading|ready|empty|error
+let pairsGen = 0;
+
+function ensureStandingsLoaded() {
+    if (standingsRequested) return;
+    standingsRequested = true;
+    loadStandings();
+}
+
+function stageKeyForTab(tabId) {
+    return Object.keys(STAGE_MAP).find(k => STAGE_MAP[k] === tabId) || 'ROUND_OF_16';
+}
+
+function standingsMessageForState() {
+    if (standingsState === 'loading') return 'Loading standings...';
+    if (standingsState === 'empty') return 'No standings data available';
+    if (standingsState === 'error') return 'Standings unavailable';
+    return '';
+}
+
+function pairsMessageForState() {
+    if (pairsState === 'loading') return 'Loading knockout ties...';
+    if (pairsState === 'empty') return 'No knockout ties available';
+    if (pairsState === 'error') return 'Knockout ties unavailable';
+    return '';
+}
+
+function renderOverview() {
+    renderOverviewStandings();
+    renderOverviewKnockout();
+}
+
+function renderOverviewStandings() {
+    renderOverviewMetrics();
+    renderRanking('strengthRanking', 'strengthScore', v => v.toFixed(1));
+    renderRanking('scheduleRanking', 'solkoffCoefficient', v => v.toFixed(2));
+}
+
+function renderRanking(containerId, valueKey, format) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (standingsState !== 'ready') {
+        el.innerHTML = `<div class="overview-state">${standingsMessageForState()}</div>`;
+        return;
+    }
+    const ranked = [...standingsData].sort(
+        (a, b) => (Number(b[valueKey]) || 0) - (Number(a[valueKey]) || 0));
+    // Bars normalize against the maximum of the COMPLETE dataset, not the
+    // visible top-10 slice.
+    const max = ranked.length ? Number(ranked[0][valueKey]) || 0 : 0;
+    el.innerHTML = ranked.slice(0, 10).map((team, i) => {
+        const value = Number(team[valueKey]) || 0;
+        const width = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+        return `<div class="rank-row">
+            <span class="rank-pos">${i + 1}</span>
+            <span class="rank-team">${crestHtml(team.teamCrest, team.teamName, team.teamCode)}<span class="rank-name">${escapeHtml(team.teamName)}</span></span>
+            <div class="bar-track"><div class="bar-fill" style="width:${width.toFixed(2)}%"></div></div>
+            <span class="rank-value">${format(value)}</span>
+        </div>`;
+    }).join('');
+    wireCrestFallbacks(el);
+}
+
+function renderOverviewMetrics() {
+    const el = document.getElementById('overviewMetrics');
+    if (!el) return;
+    const summary = buildOverviewSummary(
+        standingsState === 'ready' ? standingsData : [], overviewPairs || []);
+    el.innerHTML = [
+        metricTeamCard('Strongest Team', summary.strongest,
+            t => `Strength ${Number(t.strengthScore).toFixed(1)}`, standingsMessageForState()),
+        metricTeamCard('Toughest Schedule', summary.toughest,
+            t => `Solkoff ${Number(t.solkoffCoefficient).toFixed(2)}`, standingsMessageForState()),
+        metricTieCard(summary.balancedTie),
+    ].join('');
+    wireCrestFallbacks(el);
+}
+
+function metricTeamCard(label, team, valueLine, fallbackMsg) {
+    const body = team
+        ? `<div class="metric-value">${crestHtml(team.teamCrest, team.teamName, team.teamCode)}` +
+          `<span>${escapeHtml(team.teamName)}</span></div>` +
+          `<div class="metric-sub">${valueLine(team)}</div>`
+        : `<div class="metric-sub">${fallbackMsg || 'No data available'}</div>`;
+    return `<div class="metric-card"><div class="metric-label">${label}</div>${body}</div>`;
+}
+
+function metricTieCard(tie) {
+    let body;
+    if (tie) {
+        const norm = normalizeWinProbability(tie.winProbability);
+        const split = `${(norm.team1 * 100).toFixed(1)}% – ${(norm.team2 * 100).toFixed(1)}%`;
+        body = `<div class="metric-value"><span>${escapeHtml(tie.team1.name)} vs ${escapeHtml(tie.team2.name)}</span></div>` +
+               `<div class="metric-sub">${split}</div>`;
+    } else {
+        const msg = pairsMessageForState() || 'No meaningful probabilities available';
+        body = `<div class="metric-sub">${msg}</div>`;
+    }
+    return `<div class="metric-card"><div class="metric-label">Most Balanced Tie</div>${body}</div>`;
+}
+
+function renderOverviewKnockout() {
+    const el = document.getElementById('overviewKnockoutCards');
+    if (!el) return;
+    if (pairsState !== 'ready' || (overviewPairs || []).length === 0) {
+        el.innerHTML = `<div class="overview-state">${pairsMessageForState() || 'No knockout ties available'}</div>`;
+        renderOverviewMetrics();
+        return;
+    }
+    // Up to three previews, in API order — existing ties, not invented dates.
+    el.innerHTML = overviewPairs.slice(0, 3).map(miniMatchHtml).join('');
+    wireCrestFallbacks(el);
+    el.querySelectorAll('.mini-match').forEach(btn => {
+        // Open the stage actually fetched for this preview set, not the raw DB
+        // token on the pair (which may not exist in STAGE_MAP).
+        btn.addEventListener('click', () => openKnockoutPairFromOverview(
+            overviewPairsStage, Number(btn.dataset.team1), Number(btn.dataset.team2)));
+    });
+    renderOverviewMetrics();
+}
+
+function miniMatchHtml(pair) {
+    const t1 = pair.team1 || {};
+    const t2 = pair.team2 || {};
+    const id1 = Number(t1.id) || 0;
+    const id2 = Number(t2.id) || 0;
+    const norm = isMeaningfulProbability(pair.winProbability)
+        ? normalizeWinProbability(pair.winProbability) : null;
+    const prob = norm
+        ? `<div class="mini-prob">${(norm.team1 * 100).toFixed(1)}% – ${(norm.team2 * 100).toFixed(1)}%</div>`
+        : '<div class="mini-prob">Win probability unavailable</div>';
+    return `<button type="button" class="mini-match" data-team1="${id1}" data-team2="${id2}"` +
+        ` aria-label="Open analysis for ${escapeHtml(t1.name)} vs ${escapeHtml(t2.name)}">` +
+        `<div class="mini-row">${crestHtml(t1.crest, t1.name)}<span>${escapeHtml(t1.name)}</span></div>` +
+        `<div class="mini-row">${crestHtml(t2.crest, t2.name)}<span>${escapeHtml(t2.name)}</span></div>` +
+        miniResultsHtml(pair) + prob + '</button>';
+}
+
+function openKnockoutPairFromOverview(stageKey, team1Id, team2Id) {
+    // Reveal the Knockout view, select the pair's exact stage (pairs load from
+    // the shared cache), then open the existing analysis view for the tie.
+    activateView('knockout', { updateHash: false });
+    const tabId = Object.prototype.hasOwnProperty.call(STAGE_MAP, stageKey)
+        ? STAGE_MAP[stageKey] : null;
+    if (tabId) activateTab(tabId);
+    if (team1Id && team2Id) showPlayoffAnalysis(team1Id, team2Id);
+}
+
+// Preview pairs are chosen by the async current-stage API but only fill the
+// Overview panel; the user's route/stage selection is never overridden.
+async function loadOverviewKnockout() {
+    const stage = stageKeyForTab(initialKnockoutStage);
+    const gen = ++pairsGen;
+    overviewPairsStage = stage;
+    pairsState = 'loading';
+    overviewPairs = null;
+    renderOverviewKnockout();
+    try {
+        const pairs = await fetchKnockoutPairsOnce(stage);
+        if (gen !== pairsGen) return; // stale preview response
+        overviewPairs = pairs;
+        pairsState = pairs.length > 0 ? 'ready' : 'empty';
+    } catch (error) {
+        if (gen !== pairsGen) return;
+        console.error('Error loading overview knockout preview:', error);
+        pairsState = 'error';
+    }
+    renderOverviewKnockout();
 }

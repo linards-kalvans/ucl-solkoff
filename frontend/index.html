@@ -4,13 +4,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="UEFA Champions League strength-of-schedule standings with Solkoff coefficients and knockout pair predictions">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>UEFA Champions League - Solkoff Coefficients</title>
+    <title>UCL Strength Lab</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="stylesheet" href="/styles.css?v=2.0">
-    <link rel="stylesheet" href="/playoff-styles.css?v=2.0">
+    <link rel="stylesheet" href="/styles.css?v=3.0">
+    <link rel="stylesheet" href="/playoff-styles.css?v=3.0">
 </head>
 
 <body>
@@ -21,7 +22,7 @@
             <div class="intro-banner-text">
                 <strong>What are Solkoff Standings?</strong>
                 The <em>Solkoff coefficient</em> measures strength of schedule — it's the average points-per-game of every opponent a team has faced.
-                <strong>Strength Score</strong> = your Points% × Solkoff, so it rewards both good results <em>and</em> tough opponents.
+                <strong>Strength Score</strong> = (your Points% × Solkoff) / 100, so it rewards both good results <em>and</em> tough opponents.
                 Click any team name or Solkoff value to expand the full breakdown.
             </div>
             <button class="intro-dismiss-btn" id="introDismissBtn" aria-label="Dismiss introduction">Got it</button>
@@ -29,60 +30,141 @@
     </div>
 
     <div class="container" id="main-content" tabindex="-1">
-        <header>
-            <h1>UEFA Champions League</h1>
-            <h2>Standings with Solkoff Coefficients</h2>
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true">✦</div>
+                <div class="brand-text">
+                    <h1>UCL Strength Lab</h1>
+                    <h2>Champions League standings with Solkoff strength of schedule</h2>
+                </div>
+            </div>
+
+            <nav class="primary-nav" aria-label="Primary views">
+                <div class="primary-nav-list" role="tablist" aria-label="Views">
+                    <button class="view-btn" data-view="overview" role="tab" id="view-overview" aria-controls="overview" aria-selected="true" tabindex="0">Overview</button>
+                    <button class="view-btn" data-view="league" role="tab" id="view-league" aria-controls="league" aria-selected="false" tabindex="-1">League</button>
+                    <button class="view-btn" data-view="knockout" role="tab" id="view-knockout" aria-controls="knockout" aria-selected="false" tabindex="-1">Knockout</button>
+                </div>
+            </nav>
+
+            <div class="controls">
+                <label class="season-control" for="seasonSelect">
+                    <span class="season-label">Season</span>
+                    <select id="seasonSelect" aria-label="Select season" disabled></select>
+                </label>
+                <span id="lastUpdated" class="last-updated"></span>
+                <button id="refreshBtn" class="btn" aria-describedby="refreshHelp">Reload data</button>
+                <small id="refreshHelp" class="sort-help">Reload stored data — re-reads saved standings and results; it does not request a server-side refresh. Automatic updates run on a schedule.</small>
+                <div class="sort-help">
+                    <small>Click headers to sort • 3rd click removes sort • Strength = (Points % × Solkoff) / 100</small>
+                </div>
+            </div>
         </header>
 
-        <div class="controls">
-            <button id="refreshBtn" class="btn">Refresh Data</button>
-            <span id="lastUpdated" class="last-updated"></span>
-            <div class="sort-help">
-                <small>Click headers to sort • 3rd click removes sort • Strength = (Points % × Solkoff) / 100</small>
-            </div>
-        </div>
+        <div id="appStatus" class="app-status" role="alert" hidden></div>
 
-        <div class="tabs-container">
-            <div class="tabs-header" role="tablist" aria-label="Tournament stages">
-                <button class="tab-btn" data-tab="league" role="tab" aria-selected="false" aria-controls="league-tab" id="tab-league">League Table</button>
-                <button class="tab-btn" data-tab="knockout-playoff" role="tab" aria-selected="true" aria-controls="knockout-playoff-tab" id="tab-knockout-playoff">Knockout Play-off</button>
-                <button class="tab-btn active" data-tab="round-of-16" role="tab" aria-selected="true" aria-controls="round-of-16-tab" id="tab-round-of-16">Round of 16</button>
-                <button class="tab-btn" data-tab="quarter-final" role="tab" aria-selected="false" aria-controls="quarter-final-tab" id="tab-quarter-final">Quarter-final</button>
-                <button class="tab-btn" data-tab="semi-final" role="tab" aria-selected="false" aria-controls="semi-final-tab" id="tab-semi-final">Semi-final</button>
-                <button class="tab-btn" data-tab="final" role="tab" aria-selected="false" aria-controls="final-tab" id="tab-final">Final</button>
-            </div>
-            <div class="tabs-content">
-                <div class="tab-pane" id="league-tab" role="tabpanel" aria-labelledby="tab-league" tabindex="0">
-                    <div id="loading" class="loading">Loading standings...</div>
-                    <div id="error" class="error" style="display: none;"></div>
-                    <div class="table-container">
-                        <table id="standingsTable" class="standings-table">
-                            <thead>
-                                <tr>
-                                    <th scope="col" aria-label="Position" tabindex="0">Pos</th>
-                                    <th scope="col" aria-label="Team name">Team</th>
-                                    <th scope="col" aria-label="Games played" tabindex="0">P</th>
-                                    <th scope="col" aria-label="Wins" tabindex="0">W</th>
-                                    <th scope="col" aria-label="Draws" tabindex="0">D</th>
-                                    <th scope="col" aria-label="Losses" tabindex="0">L</th>
-                                    <th scope="col" aria-label="Goals for" tabindex="0">GF</th>
-                                    <th scope="col" aria-label="Goals against" tabindex="0">GA</th>
-                                    <th scope="col" aria-label="Goal difference" tabindex="0">GD</th>
-                                    <th scope="col" aria-label="Points" tabindex="0">Pts</th>
-                                    <th scope="col" aria-label="Solkoff coefficient: average opponent points per game" tabindex="0">Solkoff</th>
-                                    <th scope="col" aria-label="Strength score: points percentage multiplied by Solkoff" tabindex="0">Strength</th>
-                                </tr>
-                            </thead>
-                            <tbody id="standingsBody">
-                            </tbody>
-                        </table>
-                    </div>
+        <section class="view-panel" id="overview" role="tabpanel" aria-labelledby="view-overview" tabindex="0">
+            <div class="overview-metrics" id="overviewMetrics"></div>
+
+            <div class="overview-grid">
+                <div class="overview-section">
+                    <h2>Top 10 strength</h2>
+                    <div id="strengthRanking"></div>
                 </div>
-                <div class="tab-pane" id="knockout-playoff-tab" role="tabpanel" aria-labelledby="tab-knockout-playoff" tabindex="0">
+                <div class="overview-section">
+                    <h2>Top 10 toughest schedule</h2>
+                    <div id="scheduleRanking"></div>
+                </div>
+                <div class="overview-section">
+                    <h2>Knockout ties</h2>
+                    <p class="overview-note">Win probability — excluding draws.</p>
+                    <div id="overviewKnockoutCards"></div>
+                </div>
+            </div>
+
+            <section class="overview-methodology" aria-label="Methodology">
+                <div class="methodology-text">
+                    <span class="metric-label">Methodology</span>
+                    <h2>What is Solkoff?</h2>
+                    <p>
+                        Solkoff is the average opponent points per game (PPG) — it measures the difficulty
+                        of a team's schedule, not its results. A higher value means a tougher run of opponents.
+                    </p>
+                </div>
+                <div class="formula-card">
+                    <strong>Strength = (Points% × Solkoff) / 100</strong>
+                    <span>Results × schedule difficulty</span>
+                </div>
+            </section>
+        </section>
+
+        <section class="view-panel" id="league" role="tabpanel" aria-labelledby="view-league" tabindex="0" hidden>
+            <div class="league-controls">
+                <div class="league-field">
+                    <label for="teamSearch">Search team</label>
+                    <input id="teamSearch" type="search" placeholder="Filter by team name" autocomplete="off">
+                </div>
+                <div class="league-field">
+                    <label for="leagueSort">Sort by</label>
+                    <select id="leagueSort">
+                        <option value="strength" selected>Strength</option>
+                        <option value="solkoff">Solkoff</option>
+                        <option value="points">Points</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                <label class="league-advanced" for="advancedToggle">
+                    <input type="checkbox" id="advancedToggle" checked> Advanced columns
+                </label>
+            </div>
+            <p class="league-legend">
+                Qualification by official position:
+                <span class="zone-badge zone-direct">Direct</span> 1–8
+                <span class="zone-badge zone-playoff">Play-off</span> 9–24
+                <span class="zone-badge zone-out">Eliminated</span> 25+
+            </p>
+            <div id="loading" class="loading">Loading standings...</div>
+            <div id="error" class="error" style="display: none;"></div>
+            <div class="table-container">
+                <table id="standingsTable" class="standings-table">
+                    <thead>
+                        <tr>
+                            <th scope="col" aria-label="Position" tabindex="0">Pos</th>
+                            <th scope="col" aria-label="Team name">Team</th>
+                            <th scope="col" aria-label="Games played" tabindex="0">P</th>
+                            <th scope="col" class="col-adv" aria-label="Wins" tabindex="0">W</th>
+                            <th scope="col" class="col-adv" aria-label="Draws" tabindex="0">D</th>
+                            <th scope="col" class="col-adv" aria-label="Losses" tabindex="0">L</th>
+                            <th scope="col" class="col-adv" aria-label="Goals for" tabindex="0">GF</th>
+                            <th scope="col" class="col-adv" aria-label="Goals against" tabindex="0">GA</th>
+                            <th scope="col" class="col-adv" aria-label="Goal difference" tabindex="0">GD</th>
+                            <th scope="col" aria-label="Points" tabindex="0">Pts</th>
+                            <th scope="col" aria-label="Solkoff coefficient: average opponent points per game" tabindex="0">Solkoff</th>
+                            <th scope="col" aria-label="Strength score: points percentage multiplied by Solkoff" tabindex="0">Strength</th>
+                        </tr>
+                    </thead>
+                    <tbody id="standingsBody">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="view-panel" id="knockout" role="tabpanel" aria-labelledby="view-knockout" tabindex="0" hidden>
+            <div class="knockout-layout">
+            <div class="tabs-container">
+                <div class="tabs-header" role="tablist" aria-label="Tournament stages">
+                    <button class="tab-btn" data-tab="knockout-playoff" role="tab" aria-selected="false" aria-controls="knockout-playoff-tab" id="tab-knockout-playoff" tabindex="-1">Knockout Play-off</button>
+                    <button class="tab-btn active" data-tab="round-of-16" role="tab" aria-selected="true" aria-controls="round-of-16-tab" id="tab-round-of-16" tabindex="0">Round of 16</button>
+                    <button class="tab-btn" data-tab="quarter-final" role="tab" aria-selected="false" aria-controls="quarter-final-tab" id="tab-quarter-final" tabindex="-1">Quarter-final</button>
+                    <button class="tab-btn" data-tab="semi-final" role="tab" aria-selected="false" aria-controls="semi-final-tab" id="tab-semi-final" tabindex="-1">Semi-final</button>
+                    <button class="tab-btn" data-tab="final" role="tab" aria-selected="false" aria-controls="final-tab" id="tab-final" tabindex="-1">Final</button>
+                </div>
+                <div class="tabs-content">
+                    <div class="tab-pane" id="knockout-playoff-tab" role="tabpanel" aria-labelledby="tab-knockout-playoff" tabindex="0">
                     <div class="playoff-section">
                         <h2>Knockout Play-off Pairs</h2>
                         <p class="section-description">
-                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank">what is ELO?</a>
+                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank" rel="noopener noreferrer">what is ELO?</a>
                         </p>
                         <div id="knockout-playoff-pairs" class="playoff-pairs">
                             <!-- Play-off pairs will be loaded here -->
@@ -93,7 +175,7 @@
                     <div class="playoff-section">
                         <h2>Round of 16 Pairs</h2>
                         <p class="section-description">
-                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank">what is ELO?</a>
+                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank" rel="noopener noreferrer">what is ELO?</a>
                         </p>
                         <div id="round-of-16-pairs" class="playoff-pairs">
                             <!-- Pairs will be loaded here -->
@@ -104,7 +186,7 @@
                     <div class="playoff-section">
                         <h2>Quarter-final Pairs</h2>
                         <p class="section-description">
-                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank">what is ELO?</a>
+                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank" rel="noopener noreferrer">what is ELO?</a>
                         </p>
                         <div id="quarter-final-pairs" class="playoff-pairs">
                             <!-- Pairs will be loaded here -->
@@ -115,28 +197,39 @@
                     <div class="playoff-section">
                         <h2>Semi-final Pairs</h2>
                         <p class="section-description">
-                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank">what is ELO?</a>
+                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank" rel="noopener noreferrer">what is ELO?</a>
                         </p>
                         <div id="semi-final-pairs" class="playoff-pairs">
                             <!-- Pairs will be loaded here -->
                         </div>
                     </div>
                 </div>
-                <div class="tab-pane" id="final-tab" role="tabpanel" aria-labelledby="tab-final" tabindex="0">
-                    <div class="playoff-section">
-                        <h2>Final</h2>
-                        <p class="section-description">
-                            ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank">what is ELO?</a>
-                        </p>
-                        <div id="final-pairs" class="playoff-pairs">
-                            <!-- Pairs will be loaded here -->
+                    <div class="tab-pane" id="final-tab" role="tabpanel" aria-labelledby="tab-final" tabindex="0">
+                        <div class="playoff-section">
+                            <h2>Final</h2>
+                            <p class="section-description">
+                                ELO coefficient based strength predictions <a href="https://en.wikipedia.org/wiki/Elo_rating_system" target="_blank" rel="noopener noreferrer">what is ELO?</a>
+                            </p>
+                            <div id="final-pairs" class="playoff-pairs">
+                                <!-- Pairs will be loaded here -->
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
-
-        <div id="playoffAnalysisModal" class="playoff-modal"></div>
+            <aside id="analysisPanel" class="analysis-panel" role="region"
+                   aria-label="Pair analysis" aria-live="polite" hidden>
+                <div class="analysis-panel-header">
+                    <div class="analysis-panel-titles">
+                        <h2 class="analysis-panel-heading">Historical Analysis</h2>
+                        <p class="analysis-pair-title"></p>
+                    </div>
+                    <button type="button" class="analysis-close" aria-label="Close analysis">&times;</button>
+                </div>
+                <div class="analysis-content"></div>
+            </aside>
+            </div>
+        </section>
     </div>
 
     <footer class="page-footer">
@@ -161,5 +254,7 @@
 
     <script src="/app.js"></script>
 </body>
+
+<script defer src="https://analytics.mplytics.eu/script.js" data-website-id="25ff9810-7b7a-4898-9a6a-863fd088d3a7"></script>
 
 </html>

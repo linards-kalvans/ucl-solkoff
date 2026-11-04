@@ -14,17 +14,33 @@ logger = logging.getLogger(__name__)
 class PlayoffAnalyzer:
     """Analyzes play-off pairs based on historical matches against common opponents."""
     
-    def __init__(self, db: Database, api_client: APIClient):
+    def __init__(self, db: Database, api_client: APIClient,
+                 competition_id: str = "CL",
+                 season_start_year: Optional[int] = None):
         """Initialize playoff analyzer.
-        
+
         Args:
             db: Database instance
             api_client: API client for fetching historical data
+            competition_id: Competition whose ties/history are considered
+            season_start_year: Optional selected season start year. When set to a
+                past season, every query is constrained to that season's window
+                and present-day inputs (Elo, live standings) are omitted so an
+                archived view can never leak later results.
         """
         self.db = db
         self.api_client = api_client
         self.elo_calculator = EloCalculator(self.db)
         self.historical_years = int(os.getenv("HISTORICAL_YEARS", "10"))
+        self.competition_id = competition_id
+        self.season_start_year = season_start_year
+
+        from backend.season_service import current_season_year, season_bounds
+        self._season: Optional[tuple] = None
+        self._is_historical = False
+        if season_start_year is not None:
+            self._season = season_bounds(season_start_year)
+            self._is_historical = season_start_year < current_season_year()
     
     def _is_valid_date(self, date_str: Optional[str]) -> bool:
         """Check if a date string is valid and reasonable.
@@ -37,7 +53,17 @@ class PlayoffAnalyzer:
         """
         if not date_str:
             return False
-        
+
+        # Archived seasons must keep their true dates: the age/future windows
+        # below exist to spot placeholder dates in the live feed, not to blank
+        # a historical tie. Format is still validated.
+        if self._is_historical:
+            try:
+                datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                return True
+            except (ValueError, AttributeError, TypeError):
+                return False
+
         try:
             # Parse date, handling timezone
             date_str_clean = date_str.replace('Z', '+00:00') if 'Z' in date_str else date_str
@@ -71,7 +97,71 @@ class PlayoffAnalyzer:
         except (ValueError, AttributeError, TypeError) as e:
             logger.debug(f"Invalid date format: {date_str}, error: {e}")
             return False
-    
+
+    @staticmethod
+    def _fixture_from_match(match: Tuple[Any, ...]) -> Dict[str, Any]:
+        """Build the additive leg contract for one stored fixture row.
+
+        ``home_score``/``away_score`` are the two score columns appended to both
+        pair queries; a missing score stays ``None`` and is never coerced to 0.
+        """
+        return {
+            "matchId": match[0],
+            "homeTeamId": match[1],
+            "awayTeamId": match[2],
+            "homeScore": match[12],
+            "awayScore": match[13],
+            "status": match[3],
+            "date": match[5],
+        }
+
+    @staticmethod
+    def _attach_results(pair: Dict[str, Any],
+                        fixtures: List[Dict[str, Any]]) -> None:
+        """Attach chronological ``legs`` and a stable-team ``aggregateScore``.
+
+        Legs keep every selected fixture ordered by date. The aggregate exists
+        only for a completed two-leg tie (exactly two ``FINISHED`` legs with both
+        scores available) and is oriented by the pair's stable team1/team2
+        identity, never by the latest leg's home/away order. A drawn aggregate
+        stays a draw: stored goals cannot encode a shootout winner.
+        """
+        legs = sorted(fixtures, key=lambda f: (f.get("date") or "", f["matchId"]))
+        pair["legs"] = legs
+
+        aggregate = None
+        if (len(legs) == 2
+                and all(leg["status"] == "FINISHED" for leg in legs)
+                and all(leg["homeScore"] is not None and leg["awayScore"] is not None
+                        for leg in legs)):
+            team1_id = pair["team1"]["id"]
+            team1_total = 0
+            team2_total = 0
+            for leg in legs:
+                if leg["homeTeamId"] == team1_id:
+                    team1_total += leg["homeScore"]
+                    team2_total += leg["awayScore"]
+                else:
+                    team1_total += leg["awayScore"]
+                    team2_total += leg["homeScore"]
+            aggregate = {"team1": team1_total, "team2": team2_total}
+        pair["aggregateScore"] = aggregate
+
+    @staticmethod
+    def _retained_fixtures(pair: Dict[str, Any],
+                           fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]]
+                           ) -> List[Dict[str, Any]]:
+        """Return the pair's fixtures that belong to its determined stage.
+
+        Fixtures are collected per team pair, but a pair may have rows from
+        different rounds (e.g. a Round of 16 and a Final for the same teams).
+        Attachment must use only the retained pair's stage so unrelated rounds
+        can never be summed into a fictitious aggregate.
+        """
+        key = tuple(sorted([pair["team1"]["id"], pair["team2"]["id"]]))
+        return [fixture for fixture_stage, fixture in fixtures_by_pair.get(key, [])
+                if fixture_stage == pair["stage"]]
+
     def get_playoff_pairs(self, competition_id: str = "CL", stage: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get current play-off pairs from the competition.
         
@@ -92,10 +182,23 @@ class PlayoffAnalyzer:
         """
         if stage:
             return self.get_pairs_by_stage(stage, competition_id)
+        # Archived season: constrain ties to the selected competition and window.
+        season_clause = ""
+        legacy_clause = ""
+        params: tuple = ()
+        if self._season:
+            season_clause = ' AND m.competition_id = ? AND m."date" >= ? AND m."date" < ?'
+            legacy_clause = (
+                ' OR (m.stage IS NULL AND (m."round" IS NULL OR m."round" = \'\') '
+                'AND (m.group_name IS NULL OR m.group_name = \'\') AND m.matchday IS NULL '
+                'AND m."date" >= ?)'
+            )
+            params = (competition_id, self._season[0], self._season[1],
+                      f"{self.season_start_year + 1}-02-01")
         # Get matches from current competition that are in knockout stages
         # Use stage/round information if available, otherwise fall back to matchday
         # Filter out group stage matches explicitly
-        matches = self.db.fetchall("""
+        matches = self.db.fetchall(f"""
             SELECT 
                 m.id,
                 m.home_team_id,
@@ -108,12 +211,15 @@ class PlayoffAnalyzer:
                 t1.name as home_team_name,
                 t1.crest as home_team_crest,
                 t2.name as away_team_name,
-                t2.crest as away_team_crest
+                t2.crest as away_team_crest,
+                m.home_score,
+                m.away_score
             FROM matches m
             JOIN teams t1 ON m.home_team_id = t1.id
             JOIN teams t2 ON m.away_team_id = t2.id
             WHERE m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')
-            AND m.stage != 'LEAGUE_STAGE'  -- Exclude league/group stage matches
+            AND (m.stage IS NULL OR m.stage != 'LEAGUE_STAGE')
+            {season_clause}
             AND (
                 -- Explicit knockout stage indicators
                 m.stage = 'KNOCKOUT_OUT' OR
@@ -130,14 +236,16 @@ class PlayoffAnalyzer:
                 -- Fallback: matchday >= 7 (knockout stages typically start here)
                 -- Exclude group stage matches (where group_name is set or stage is LEAGUE_STAGE)
                 (m.matchday >= 7 AND (m.group_name IS NULL OR m.group_name = '') AND (m.stage IS NULL OR m.stage != 'LEAGUE_STAGE'))
+                {legacy_clause}
             )
             ORDER BY m.matchday, m.date
-        """)
+        """, params)
         
         # Group matches into pairs
         # In knockout stages, teams play each other in two-legged ties
         # We identify pairs by finding teams that play each other
         pairs_dict = {}
+        fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]] = {}
         
         for match in matches:
             home_id = match[1]
@@ -182,8 +290,10 @@ class PlayoffAnalyzer:
                 elif 'FINAL' in stage_upper:
                     stage = "Final"
             
-            # Fallback to matchday-based detection if stage not determined
-            if not stage:
+            # Fallback to matchday-based detection if stage not determined.
+            # A legacy row may have no matchday at all; only the season date
+            # boundary can place it, so guard the comparison.
+            if not stage and matchday is not None:
                 if matchday <= 8:
                     stage = "Knockout Round Play-off"
                 elif matchday <= 10:
@@ -194,7 +304,22 @@ class PlayoffAnalyzer:
                     stage = "Semi-finals"
                 else:
                     stage = "Final"
-            
+
+            if not stage:
+                # Untagged legacy tie inside a historical season: the February
+                # boundary marks the play-off round (legacy league rows sit
+                # before it and are excluded by the query).
+                if self._is_historical and match[5] and match[5] >= f"{self.season_start_year + 1}-02-01":
+                    stage = "Knockout Round Play-off"
+                else:
+                    continue
+            # Retain every selected fixture (tagged with its determined stage)
+            # so the pair can expose chronological leg results once grouping is
+            # complete.
+            fixtures_by_pair.setdefault(pair_key, []).append(
+                (stage, self._fixture_from_match(match)))
+
+
             # If we haven't seen this pair, or if this is a more recent match, update it
             if pair_key not in pairs_dict:
                 pairs_dict[pair_key] = {
@@ -217,10 +342,13 @@ class PlayoffAnalyzer:
                     "apiRound": api_round
                 }
             else:
-                # Update with most recent match information
+                # Update with most recent match information. Legacy rows may
+                # have no matchday, so compare None-safely.
                 existing_pair = pairs_dict[pair_key]
-                if matchday > existing_pair["matchday"] or (
-                    matchday == existing_pair["matchday"] and 
+                existing_matchday = existing_pair["matchday"] or 0
+                current_matchday = matchday or 0
+                if current_matchday > existing_matchday or (
+                    current_matchday == existing_matchday and 
                     match[5] and existing_pair.get("date") and 
                     match[5] > existing_pair["date"]
                 ):
@@ -232,7 +360,10 @@ class PlayoffAnalyzer:
         
         # Convert to list and sort by stage and matchday
         pairs = list(pairs_dict.values())
-        
+
+        for pair in pairs:
+            self._attach_results(pair, self._retained_fixtures(pair, fixtures_by_pair))
+
         # Sort by stage priority and matchday
         stage_priority = {
             "Knockout Round Play-off": 1,
@@ -260,18 +391,25 @@ class PlayoffAnalyzer:
             Current stage: 'LEAGUE', 'KNOCKOUT_PLAYOFF', 'ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL'
         """
         # Get all matches ordered by matchday DESC to find the highest stage
-        matches = self.db.fetchall("""
+        season_clause = ""
+        params: tuple = ()
+        if self._season:
+            season_clause = ' AND m.competition_id = ? AND m."date" >= ? AND m."date" < ?'
+            params = (competition_id, self._season[0], self._season[1])
+        matches = self.db.fetchall(f"""
             SELECT 
                 m.stage,
                 m.round,
                 m.matchday,
                 m.status,
-                m.group_name
+                m.group_name,
+                m."date"
             FROM matches m
             WHERE m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')
+            {season_clause}
             ORDER BY m.matchday DESC, m.date DESC
             LIMIT 100
-        """)
+        """, params)
         
         if not matches:
             return 'LEAGUE'
@@ -284,9 +422,20 @@ class PlayoffAnalyzer:
             round_info = match[1]
             matchday = match[2]
             group_name = match[4]
+            match_date = match[5]
             
             # Skip league stage matches
             if stage == 'LEAGUE_STAGE' or (group_name and group_name != ''):
+                continue
+            
+            # Legacy rows imported before new-format headers were recognised
+            # have NULL stage/round/group and no matchday. Only the season's
+            # February boundary can place them; never guess or crash on the
+            # missing matchday. League-phase legacy rows (Sep-Jan) are skipped.
+            if stage is None and not round_info and not group_name and matchday is None:
+                if (self._is_historical and match_date
+                        and match_date >= f"{self.season_start_year + 1}-02-01"):
+                    stages_found.add('KNOCKOUT_PLAYOFF')
                 continue
             
             # Check round field first (most specific)
@@ -317,8 +466,8 @@ class PlayoffAnalyzer:
                 elif 'FINAL' in stage_upper:
                     stages_found.add('FINAL')
             
-            # Fallback to matchday-based detection
-            if matchday >= 7:
+            # Fallback to matchday-based detection (guard NULL matchday)
+            if matchday is not None and matchday >= 7:
                 if matchday <= 8:
                     stages_found.add('KNOCKOUT_PLAYOFF')
                 elif matchday <= 10:
@@ -360,27 +509,30 @@ class PlayoffAnalyzer:
         stage_filters = {
             'KNOCKOUT_PLAYOFF': {
                 'round_patterns': ['%PLAY_OFF%', '%PLAYOFF%'],
-                'stage_values': ['KNOCKOUT_OUT', 'KNOCKOUT_ROUND', 'PLAYOFFS', 'PLAY_OFF'],
+                'stage_values': ['KNOCKOUT_OUT', 'KNOCKOUT_ROUND', 'PLAYOFFS', 'PLAY_OFF',
+                                 'KNOCKOUT_PLAYOFF'],
                 'matchday_range': (1, 10)  # Expanded to catch matchday 1 matches
             },
             'ROUND_OF_16': {
                 'round_patterns': ['%ROUND_OF_16%', '%ROUND OF 16%', '%LAST_16%'],
-                'stage_values': ['LAST_16'],
+                'stage_values': ['ROUND_OF_16', 'LAST_16'],
                 'matchday_range': (9, 10)
             },
             'QUARTER_FINAL': {
                 'round_patterns': ['%QUARTER%'],
-                'stage_values': [],
+                'stage_values': ['QUARTER_FINAL', 'QUARTER_FINALS'],
                 'matchday_range': (11, 12)
             },
             'SEMI_FINAL': {
                 'round_patterns': ['%SEMI%'],
-                'stage_values': [],
+                'stage_values': ['SEMI_FINAL', 'SEMI_FINALS'],
                 'matchday_range': (13, 14)
             },
             'FINAL': {
+                # Distinct final: a plain '%FINAL%' LIKE would also match
+                # "Quarter-final"/"Semi-final". Match the standalone round only.
                 'round_patterns': ['%FINAL%'],
-                'stage_values': [],
+                'stage_values': ['FINAL'],
                 'matchday_range': (15, 999)
             }
         }
@@ -392,19 +544,29 @@ class PlayoffAnalyzer:
         
         # Build query conditions
         conditions = ["m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')"]
-        # Only get current season matches (competition_id = 'CL' for current season)
-        # Filter by date to get only current season (August of current year onwards, or previous August if we're before August)
-        from datetime import datetime
-        current_year = datetime.now().year
-        current_month = datetime.now().month
-        # Season starts in August, so if we're before August, the season started in previous year
-        season_start_year = current_year if current_month >= 8 else current_year - 1
-        season_start_date = f"{season_start_year}-08-01"
-        conditions.append(f"m.competition_id = '{competition_id}'")
-        conditions.append(f"m.date >= '{season_start_date}'")
+        query_params: List[Any] = []
+        conditions.append("m.competition_id = ?")
+        query_params.append(competition_id)
+        if self._season:
+            # Archived season: constrain to BOTH bounds of the selected window.
+            conditions.append('m."date" >= ?')
+            conditions.append('m."date" < ?')
+            query_params.extend([self._season[0], self._season[1]])
+        else:
+            # Current season only (August of the current season onward).
+            from datetime import datetime
+            current_year = datetime.now().year
+            current_month = datetime.now().month
+            season_start_year = current_year if current_month >= 8 else current_year - 1
+            conditions.append('m."date" >= ?')
+            query_params.append(f"{season_start_year}-08-01")
         
         round_conditions = []
-        if filters['round_patterns']:
+        if stage == 'FINAL':
+            # Exact standalone round, trimmed and case-insensitive: never match
+            # the "final" substring inside Quarter-final/Semi-final.
+            round_conditions.append("UPPER(TRIM(m.round)) = 'FINAL'")
+        elif filters['round_patterns']:
             for pattern in filters['round_patterns']:
                 round_conditions.append(f"UPPER(m.round) LIKE '{pattern}'")
         
@@ -422,8 +584,30 @@ class PlayoffAnalyzer:
         if stage_conditions:
             stage_round_conditions.append(f"({' OR '.join(stage_conditions)})")
         if matchday_min:
-            stage_round_conditions.append(f"(m.matchday >= {matchday_min} AND m.matchday <= {matchday_max} AND (m.group_name IS NULL OR m.group_name = '') AND (m.stage IS NULL OR m.stage != 'LEAGUE_STAGE'))")
-        
+            # Matchday fallback is only for genuinely untyped rows: NULL/blank
+            # round with a generic (NULL or 'KNOCKOUT') stage. A row that
+            # explicitly declares a stage or round must never fall into a
+            # sibling tab's range.
+            fallback = (
+                f"(m.matchday >= {matchday_min} AND m.matchday <= {matchday_max} "
+                "AND (m.group_name IS NULL OR m.group_name = '') "
+                "AND (m.round IS NULL OR m.round = '') "
+                "AND (m.stage IS NULL OR m.stage = 'KNOCKOUT'))"
+            )
+            stage_round_conditions.append(fallback)
+
+        # Legacy stored play-off ties (imported before new-format headers were
+        # recognised) have NULL stage/round/group/matchday. Only a historical
+        # season query reaches them, and only a date at or after the February
+        # play-off boundary distinguishes them from the legacy league phase.
+        if self._is_historical and stage == 'KNOCKOUT_PLAYOFF':
+            stage_round_conditions.append(
+                '(m.stage IS NULL AND (m."round" IS NULL OR m."round" = \'\') '
+                'AND (m.group_name IS NULL OR m.group_name = \'\') AND m.matchday IS NULL '
+                'AND m."date" >= ?)'
+            )
+            query_params.append(f"{self.season_start_year + 1}-02-01")
+
         if stage_round_conditions:
             conditions.append(f"({' OR '.join(stage_round_conditions)})")
         
@@ -440,7 +624,9 @@ class PlayoffAnalyzer:
                 t1.name as home_team_name,
                 t1.crest as home_team_crest,
                 t2.name as away_team_name,
-                t2.crest as away_team_crest
+                t2.crest as away_team_crest,
+                m.home_score,
+                m.away_score
             FROM matches m
             JOIN teams t1 ON m.home_team_id = t1.id
             JOIN teams t2 ON m.away_team_id = t2.id
@@ -448,10 +634,11 @@ class PlayoffAnalyzer:
             ORDER BY m.matchday, m.date
         """
         
-        matches = self.db.fetchall(query)
+        matches = self.db.fetchall(query, tuple(query_params))
         
         # Group matches into pairs
         pairs_dict = {}
+        fixtures_by_pair: Dict[tuple, List[Tuple[str, Dict[str, Any]]]] = {}
         stage_display_name = {
             'KNOCKOUT_PLAYOFF': 'Knockout Round Play-off',
             'ROUND_OF_16': 'Round of 16',
@@ -471,7 +658,13 @@ class PlayoffAnalyzer:
                 continue
             
             pair_key = tuple(sorted([home_id, away_id]))
-            
+
+            # Retain every selected fixture (tagged with this stage) so the pair
+            # can expose chronological leg results once grouping is complete.
+            fixtures_by_pair.setdefault(pair_key, []).append(
+                (stage_display_name.get(stage, stage),
+                 self._fixture_from_match(match)))
+
             if pair_key not in pairs_dict:
                 pairs_dict[pair_key] = {
                     "matchId": match[0],
@@ -494,8 +687,10 @@ class PlayoffAnalyzer:
                 }
             else:
                 existing_pair = pairs_dict[pair_key]
-                if matchday > existing_pair["matchday"] or (
-                    matchday == existing_pair["matchday"] and 
+                existing_matchday = existing_pair["matchday"] or 0
+                current_matchday = matchday or 0
+                if current_matchday > existing_matchday or (
+                    current_matchday == existing_matchday and 
                     match[5] and existing_pair.get("date") and 
                     match[5] > existing_pair["date"]
                 ):
@@ -506,9 +701,28 @@ class PlayoffAnalyzer:
                         existing_pair["date"] = match[5]
         
         pairs = list(pairs_dict.values())
-        
+
+        for pair in pairs:
+            self._attach_results(pair, self._retained_fixtures(pair, fixtures_by_pair))
+
         # Calculate win probability for each pair using the same method as analyze_pair
         # This ensures consistency between pair cards and historical analysis popup
+        # Archived seasons omit probabilities: present-day Elo/live-strength inputs
+        # would leak later information into the prediction.
+        if self._is_historical:
+            for pair in pairs:
+                pair["winProbability"] = {
+                    "team1Win": 0.0,
+                    "team2Win": 0.0,
+                    "draw": 0.0,
+                    "method": "historical_no_data",
+                }
+            pairs.sort(key=lambda x: (
+                x.get("matchday") if x.get("matchday") is not None else 0,
+                x.get("date") if x.get("date") is not None else ""
+            ))
+            return pairs
+
         for pair in pairs:
             try:
                 # Use the same calculation as analyze_pair for consistency
@@ -637,8 +851,16 @@ class PlayoffAnalyzer:
         Returns:
             Set of common opponent team IDs
         """
+        # Archived seasons: common-opponent history must not reach past the
+        # selected season's end (and stays within the selected competition).
+        extra_sql = ""
+        extra_params: tuple = ()
+        if self._season:
+            extra_sql = ' AND competition_id = ? AND "date" < ?'
+            extra_params = (self.competition_id, self._season[1])
+
         # Get opponents for team 1
-        team1_opponents = self.db.fetchall("""
+        team1_opponents = self.db.fetchall(f"""
             SELECT DISTINCT 
                 CASE 
                     WHEN home_team_id = ? THEN away_team_id
@@ -646,13 +868,13 @@ class PlayoffAnalyzer:
                 END as opponent_id
             FROM matches
             WHERE (home_team_id = ? OR away_team_id = ?)
-            AND status = 'FINISHED'
-        """, (team1_id, team1_id, team1_id))
+            AND status = 'FINISHED'{extra_sql}
+        """, (team1_id, team1_id, team1_id) + extra_params)
         
         team1_opponent_set = {row[0] for row in team1_opponents if row[0] != team1_id and row[0] != team2_id}
         
         # Get opponents for team 2
-        team2_opponents = self.db.fetchall("""
+        team2_opponents = self.db.fetchall(f"""
             SELECT DISTINCT 
                 CASE 
                     WHEN home_team_id = ? THEN away_team_id
@@ -660,8 +882,8 @@ class PlayoffAnalyzer:
                 END as opponent_id
             FROM matches
             WHERE (home_team_id = ? OR away_team_id = ?)
-            AND status = 'FINISHED'
-        """, (team2_id, team2_id, team2_id))
+            AND status = 'FINISHED'{extra_sql}
+        """, (team2_id, team2_id, team2_id) + extra_params)
         
         team2_opponent_set = {row[0] for row in team2_opponents if row[0] != team1_id and row[0] != team2_id}
         
@@ -694,14 +916,30 @@ class PlayoffAnalyzer:
             }
         
         # Calculate cutoff date for historical matches (last 10 years)
-        cutoff_date = (datetime.now() - timedelta(days=self.historical_years * 365)).strftime("%Y-%m-%d")
+        if self._season:
+            # Archived season: history ends at the selected season's end and
+            # stays within the selected competition.
+            cutoff_date = (
+                datetime.fromisoformat(self._season[1])
+                - timedelta(days=self.historical_years * 365)
+            ).strftime("%Y-%m-%d")
+            competition_clause = ' AND m.competition_id = ?'
+            upper_clause = ' AND m."date" < ?'
+            competition_param: List[Any] = [self.competition_id]
+            season_param: List[Any] = [self._season[1]]
+        else:
+            cutoff_date = (datetime.now() - timedelta(days=self.historical_years * 365)).strftime("%Y-%m-%d")
+            competition_clause = ''
+            upper_clause = ''
+            competition_param = []
+            season_param = []
         
         # Build parameter lists properly - convert set to list for consistent ordering
         common_opponents_list = list(common_opponents)
         placeholders = ','.join(['?' for _ in common_opponents_list])
         
         # Team 1 query parameters: 6 team1_id params + common opponents + cutoff_date
-        team1_params = [team1_id] * 6 + common_opponents_list + [cutoff_date]
+        team1_params = [team1_id] * 6 + common_opponents_list + [cutoff_date] + competition_param + season_param
         
         team1_matches = self.db.fetchall(f"""
             SELECT 
@@ -727,12 +965,12 @@ class PlayoffAnalyzer:
                 END IN ({placeholders})
             )
             AND m.status = 'FINISHED'
-            AND m.date >= ?
+            AND m.date >= ?{competition_clause}{upper_clause}
             ORDER BY m.date DESC
         """, tuple(team1_params))
         
         # Team 2 query parameters: 6 team2_id params + common opponents + cutoff_date
-        team2_params = [team2_id] * 6 + common_opponents_list + [cutoff_date]
+        team2_params = [team2_id] * 6 + common_opponents_list + [cutoff_date] + competition_param + season_param
         
         team2_matches = self.db.fetchall(f"""
             SELECT 
@@ -758,7 +996,7 @@ class PlayoffAnalyzer:
                 END IN ({placeholders})
             )
             AND m.status = 'FINISHED'
-            AND m.date >= ?
+            AND m.date >= ?{competition_clause}{upper_clause}
             ORDER BY m.date DESC
         """, tuple(team2_params))
         
@@ -790,9 +1028,9 @@ class PlayoffAnalyzer:
             WHERE m.home_team_id IN ({all_placeholders})
             AND m.away_team_id IN ({all_placeholders})
             AND m.status = 'FINISHED'
-            AND m.date >= ?
+            AND m.date >= ?{competition_clause}{upper_clause}
             ORDER BY m.date DESC
-        """, tuple(all_team_ids_list) + tuple(all_team_ids_list) + (cutoff_date,))
+        """, tuple(all_team_ids_list) + tuple(all_team_ids_list) + (cutoff_date,) + tuple(competition_param) + tuple(season_param))
         
         # Calculate statistics for all teams
         all_teams_stats = {}
@@ -1229,6 +1467,10 @@ class PlayoffAnalyzer:
         Returns:
             Strength rating from main league table, or 0.0 if not available
         """
+        # Archived seasons have no live standings for this team; returning the
+        # current table would leak later results into the archive.
+        if self._is_historical:
+            return 0.0
         try:
             result = self.db.fetchone("""
                 SELECT 
@@ -1270,6 +1512,16 @@ class PlayoffAnalyzer:
         Returns:
             Dictionary with win probabilities
         """
+        # Archived seasons: present-day Elo/live inputs would leak later
+        # information, so no probability is offered (frontend shows unavailable).
+        if self._is_historical:
+            return {
+                "team1Win": 0.0,
+                "team2Win": 0.0,
+                "draw": 0.0,
+                "method": "historical_no_data",
+            }
+
         # Try Elo-based probability first
         if team1_id is not None and team2_id is not None:
             elo_result = self.elo_calculator.get_win_probability(team1_id, team2_id)
