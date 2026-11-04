@@ -28,6 +28,7 @@ import duckdb
 from backend.football_txt_parser import FootballTxtParser
 from backend.fixture_ids import deterministic_match_id, effective_matchday
 from backend.team_matcher import normalize_team_name, strip_kickoff
+from backend.team_identity import TeamRedirectResolver
 
 logger = logging.getLogger(__name__)
 
@@ -370,18 +371,47 @@ def resolve_identity(conn, prepared: Sequence[PreparedSeason],
 
     ``plan`` maps source name -> team id. ``new_teams`` maps the names that need
     a fresh clean node -> new deterministic id.
+
+    Reviewed retired ids are consulted through the shared redirect resolver: a
+    retired row is kept as provenance but is never a candidate or a referenced
+    target; a source name that only a retired alias carries resolves to its
+    unique active root (ambiguity raises), and an explicit mapping onto a retired
+    id resolves to its active root. On a legacy schema without
+    ``team_redirects`` this is a pure identity lookup.
     """
     explicit_mapping = dict(explicit_mapping or {})
-    existing = {tid: name for tid, name in conn.execute("SELECT id, name FROM teams").fetchall()}
+    resolver = TeamRedirectResolver(conn)
+    raw_existing = {
+        tid: name for tid, name in conn.execute("SELECT id, name FROM teams").fetchall()
+    }
+    # Active rows only are identity candidates; retired rows resolve to a root.
+    existing = {
+        tid: name for tid, name in raw_existing.items()
+        if resolver.canonical_id(tid) == tid
+    }
     by_name: Dict[str, List[int]] = {}
     for tid, name in existing.items():
         by_name.setdefault(name, []).append(tid)
 
-    for name, tid in explicit_mapping.items():
-        if tid not in existing:
-            raise RepairError(f"explicit mapping {name!r} -> {tid} references unknown team")
+    # A source name carried only by retained retired rows must resolve to that
+    # row's active root, not allocate a twin. Collected separately so a unique
+    # active root is preferred before any new node is created.
+    retired_roots_by_name: Dict[str, List[int]] = {}
+    for tid, name in raw_existing.items():
+        if tid in resolver.retired_ids():
+            retired_roots_by_name.setdefault(name, []).append(
+                resolver.canonical_id(tid)
+            )
 
-    reserved = set(existing)
+    for name, tid in explicit_mapping.items():
+        root = resolver.canonical_id(tid)
+        if root not in raw_existing:
+            raise RepairError(f"explicit mapping {name!r} -> {tid} references unknown team")
+        explicit_mapping[name] = root
+
+    # Reserved ids include retired rows so a fresh deterministic id can never
+    # collide with (and overwrite) a retained retired row.
+    reserved = set(raw_existing)
     plan: Dict[str, int] = {}
     new_teams: Dict[str, int] = {}
 
@@ -398,6 +428,17 @@ def resolve_identity(conn, prepared: Sequence[PreparedSeason],
             raise RepairError(
                 f"ambiguous identity for {name!r}: existing ids {sorted(candidates)}; "
                 "provide an explicit reviewed mapping"
+            )
+        # No active row carries the name. If retained retired aliases do, resolve
+        # to their unique active root instead of allocating a duplicate club.
+        retired_roots = sorted(set(retired_roots_by_name.get(name, [])))
+        if len(retired_roots) == 1:
+            plan[name] = retired_roots[0]
+            continue
+        if len(retired_roots) > 1:
+            raise RepairError(
+                f"ambiguous identity for {name!r}: retired aliases resolve to "
+                f"{retired_roots}; provide an explicit reviewed mapping"
             )
         # No exact match: a clean node with the same casefolded name would be an
         # ambiguity (variant spelling), everything else means polluted-only.

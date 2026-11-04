@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UCL Strength Lab</title>
+  <meta name="description" content="Alternative Champions League rankings and knockout predictions">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">✦</div>
+        <div>
+          <h1>UCL Strength Lab</h1>
+          <p>Alternative Champions League rankings and knockout predictions</p>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="Primary">
+        <button class="nav-btn active" data-view="overview">Overview</button>
+        <button class="nav-btn" data-view="league">League</button>
+        <button class="nav-btn" data-view="knockout">Knockout</button>
+      </nav>
+
+      <div class="topbar-meta">
+        <div class="meta-block">
+          <span>Season</span>
+          <strong>2024/25</strong>
+        </div>
+        <div class="meta-block">
+          <span>Last updated</span>
+          <strong>Mar 4, 2025 · 10:24 UTC</strong>
+        </div>
+        <button class="ghost-btn">↻ Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="overview" class="view active-view">
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="eyebrow">Strongest Team</span>
+            <div class="metric-main">
+              <div class="crest crest-blue">MC</div>
+              <div>
+                <h2>Man City</h2>
+                <div class="metric-value">93.4</div>
+                <p>Strength score</p>
+              </div>
+            </div>
+            <span class="trend positive">▲ +2.1</span>
+          </article>
+
+          <article class="metric-card">
+            <span class="eyebrow">Toughest Schedule</span>
+            <div class="metric-main">
+              <div class="crest crest-blackblue">IN</div>
+              <div>
+                <h2>Inter</h2>
+                <div class="metric-value">1.38</div>
+                <p>Solkoff value</p>
+              </div>
+            </div>
+            <span class="trend negative">▲ +0.12</span>
+          </article>
+
+          <article class="metric-card">
+            <span class="eyebrow">Highest Solkoff</span>
+            <div class="metric-main">
+              <div class="crest crest-gold">RM</div>
+              <div>
+                <h2>Real Madrid</h2>
+                <div class="metric-value">1.42</div>
+                <p>Solkoff value</p>
+              </div>
+            </div>
+            <span class="trend positive">▲ +0.08</span>
+          </article>
+
+          <article class="metric-card">
+            <span class="eyebrow">Most Balanced Tie</span>
+            <div class="metric-main compact">
+              <div class="crest crest-red">ATM</div>
+              <div>
+                <h2>Atlético vs Dortmund</h2>
+                <div class="metric-value">51% – 49%</div>
+                <p>Advance probability</p>
+              </div>
+              <div class="crest crest-yellow">BVB</div>
+            </div>
+          </article>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Top Strength Ranking</h2>
+              <button class="link-btn" data-view="league">View full table →</button>
+            </div>
+            <div class="ranking-table" id="strengthRanking"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Toughest Schedules</h2>
+            </div>
+            <div class="ranking-table" id="scheduleRanking"></div>
+          </section>
+
+          <section class="panel knockout-panel">
+            <div class="panel-header">
+              <h2>Upcoming Knockout Ties</h2>
+              <button class="link-btn" data-view="knockout">View all ties →</button>
+            </div>
+            <div id="overviewKnockoutCards" class="mini-match-list"></div>
+          </section>
+        </div>
+
+        <section class="panel explainer">
+          <div>
+            <span class="eyebrow">Methodology</span>
+            <h2>What is Solkoff?</h2>
+            <p>
+              Solkoff measures schedule difficulty by looking at the quality of a team's opponents.
+              A higher value means a tougher schedule.
+            </p>
+          </div>
+          <div class="formula-card">
+            <strong>Strength = Points% × Solkoff</strong>
+            <span>Performance × schedule difficulty</span>
+          </div>
+        </section>
+      </section>
+
+      <section id="league" class="view">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow">League analytics</span>
+            <h2>League Strength Rankings</h2>
+            <p>Teams ranked by schedule-adjusted strength.</p>
+          </div>
+          <div class="toolbar">
+            <label class="control">
+              <span>Sort by</span>
+              <select id="leagueSort">
+                <option value="strength">Strength</option>
+                <option value="solkoff">Solkoff</option>
+                <option value="points">Points</option>
+              </select>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="advancedToggle" checked />
+              <span>Show advanced stats</span>
+            </label>
+            <input id="teamSearch" class="search-input" placeholder="Search teams…" />
+          </div>
+        </div>
+
+        <section class="panel table-panel">
+          <div class="league-table-wrap">
+            <table class="league-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Team</th><th>Pld</th>
+                  <th class="advanced">W</th><th class="advanced">D</th><th class="advanced">L</th>
+                  <th class="advanced">GF</th><th class="advanced">GA</th><th class="advanced">GD</th>
+                  <th>Pts</th><th>Solkoff</th><th>Strength</th>
+                </tr>
+              </thead>
+              <tbody id="leagueBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="knockout" class="view">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow">Knockout analytics</span>
+            <h2>Knockout Predictions</h2>
+            <p>Probabilities and Elo-based matchup analysis.</p>
+          </div>
+        </div>
+
+        <div class="stage-tabs" role="tablist">
+          <button>Play-off</button>
+          <button class="active">Round of 16</button>
+          <button>Quarter-final</button>
+          <button>Semi-final</button>
+          <button>Final</button>
+        </div>
+
+        <div class="knockout-layout">
+          <div class="match-grid" id="knockoutGrid"></div>
+          <aside class="analysis-panel" id="analysisPanel">
+            <div class="analysis-placeholder">Select a matchup to view analysis.</div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

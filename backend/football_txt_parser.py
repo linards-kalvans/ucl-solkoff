@@ -80,8 +80,12 @@ class FootballTxtParser:
                 self.current_competition = self._normalize_competition(comp_name)
                 logger.debug(f"Found competition: {comp_name}")
             
-            # Parse new-format (2024/25+) league-phase header, e.g. "League, Matchday 1"
-            elif 'league' in line.lower() and 'matchday' in line.lower():
+            # Parse new-format (2024/25+) league-phase header. Two shapes exist:
+            # "League, Matchday 1" (with a matchday) and the plain "League phase"
+            # used by the real EL/UCL files. Exclude knockout headings that also
+            # mention a "phase" (e.g. "Knockout phase") so the league tag never
+            # leaks into the play-off section.
+            elif self._is_league_heading(line):
                 self.current_stage = "LEAGUE_STAGE"
                 self.current_round = None
                 self.current_group = None
@@ -140,14 +144,18 @@ class FootballTxtParser:
             "season": season
         }
     
-    def _normalize_competition(self, comp_name: str) -> str:
-        """Normalize competition name to code.
-        
+    def _normalize_competition(self, comp_name: str) -> Optional[str]:
+        """Normalize a competition name from a file header to a code.
+
+        Returns ``None`` for an unrecognised name so an unknown header is never
+        silently treated as Champions League. Callers that already know the
+        expected competition keep using that explicit context.
+
         Args:
             comp_name: Competition name from file
-            
+
         Returns:
-            Competition code (CL, EL, UCL)
+            Competition code (CL, EL, UCL) or ``None`` when unrecognised
         """
         comp_name_lower = comp_name.lower()
         if 'champions league' in comp_name_lower:
@@ -156,7 +164,7 @@ class FootballTxtParser:
             return "EL"
         elif 'conference league' in comp_name_lower:
             return "UCL"
-        return "CL"  # Default
+        return None
     
     def _extract_teams_from_group_line(self, line: str) -> List[str]:
         """Extract team names from a group stage header line.
@@ -183,6 +191,23 @@ class FootballTxtParser:
         
         return teams
     
+    def _is_league_heading(self, line: str) -> bool:
+        """True for league-phase headings, with or without a matchday.
+
+        Matches both ``League, Matchday N`` and the plain ``▪ League phase``
+        header used by the real EL/UCL files. Knockout headings that happen to
+        contain the word "phase" (e.g. ``Knockout phase``) are excluded so the
+        league tag is not applied to the play-off section.
+        """
+        low = line.lower()
+        if 'league' not in low:
+            return False
+        if not ('matchday' in low or 'phase' in low):
+            return False
+        return not any(key in low for key in (
+            'knockout', 'playoff', 'play-off', 'final',
+        ))
+
     def _is_knockout_heading(self, line: str) -> bool:
         """True for knockout round headings, case-insensitively.
 

@@ -139,63 +139,61 @@ class GitHubDataFetcher:
         
         logger.debug(f"Available files in {season}: {available_files}")
         
-        # Map competition codes to file names
-        # Note: The repository uses short names like cl.txt, el.txt, conf.txt
+        # Map competition codes to their exact file names. Only a file whose
+        # header confirms the requested competition is accepted; another
+        # competition's file is never used as a fallback.
         comp_map = {
-            "CL": ["cl.txt", "champions-league.txt", "champions.txt"],
-            "EL": ["el.txt", "europa-league.txt", "europa.txt"],
-            "UCL": ["conf.txt", "conference-league.txt", "conference.txt", "ucl.txt", "ecl.txt"]
+            "CL": ["cl.txt", "champions-league.txt"],
+            "EL": ["el.txt", "europa-league.txt"],
+            "UCL": ["conf.txt", "conference-league.txt"],
         }
-        
-        # Try competition-specific file names first
         file_names_to_try = comp_map.get(competition, [f"{competition.lower()}.txt"])
-        
-        # Also try generic patterns
-        file_names_to_try.extend([
-            "README.txt",
-            "champions-league.txt",  # Fallback for CL
-            "europa-league.txt",     # Fallback for EL
-            "conference-league.txt"  # Fallback for UCL
-        ])
-        
+
         season_path = self.cloned_repo_path / season
-        
-        # Try files that actually exist in the directory
+
         for file_name in file_names_to_try:
             if file_name in available_files:
                 file_path = season_path / file_name
                 try:
                     content = file_path.read_text(encoding='utf-8')
+                except Exception as e:
+                    logger.debug(f"Error reading {file_path}: {e}")
+                    continue
+                if self._content_matches_competition(content, competition):
                     logger.info(f"Read {season} {competition} from cloned repo ({file_name})")
                     return content
-                except Exception as e:
-                    logger.debug(f"Error reading {file_path}: {e}")
-                    continue
-        
-        # If no specific file found, try any .txt file in the directory
-        # (some seasons might have a single file with all competitions)
-        for file_name in available_files:
-            if file_name.endswith('.txt') and file_name not in file_names_to_try:
-                file_path = season_path / file_name
-                try:
-                    content = file_path.read_text(encoding='utf-8')
-                    # Check if content contains our competition
-                    content_lower = content.lower()
-                    comp_keywords = {
-                        "CL": ["champions league", "uefa champions"],
-                        "EL": ["europa league", "uefa europa"],
-                        "UCL": ["conference league", "uefa conference", "europa conference"]
-                    }
-                    keywords = comp_keywords.get(competition, [])
-                    if any(keyword in content_lower for keyword in keywords):
-                        logger.info(f"Read {season} {competition} from cloned repo ({file_name})")
-                        return content
-                except Exception as e:
-                    logger.debug(f"Error reading {file_path}: {e}")
-                    continue
-        
-        logger.warning(f"Could not find file for season {season}, competition {competition}")
+                logger.warning(
+                    f"Refusing {season} {file_name}: header does not identify "
+                    f"{competition}"
+                )
+
+        logger.warning(
+            f"No verified {competition} source found for season {season}"
+        )
         return None
+
+    # Header keywords that identify each competition's openfootball file.
+    _COMPETITION_HEADERS = {
+        "CL": ("champions league", "uefa champions"),
+        "EL": ("europa league", "uefa europa"),
+        "UCL": ("conference league", "uefa conference", "europa conference"),
+    }
+
+    def _content_matches_competition(self, content: str, competition: str) -> bool:
+        """True when the file's competition header identifies ``competition``.
+
+        The header is the first ``=`` line. A missing header is not a
+        confirmation, so unverified content is rejected rather than guessed.
+        """
+        keywords = self._COMPETITION_HEADERS.get(competition)
+        if not keywords:
+            return False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("="):
+                header = stripped.lower()
+                return any(keyword in header for keyword in keywords)
+        return False
     
     def list_available_seasons(self) -> List[str]:
         """List available seasons in the cloned repository.

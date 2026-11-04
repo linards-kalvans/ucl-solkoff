@@ -5,6 +5,7 @@ from typing import Dict, Optional, Tuple
 from difflib import SequenceMatcher
 
 from backend.fixture_ids import INT32_MIN
+from backend.team_identity import TeamRedirectResolver
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,10 @@ class TeamMatcher:
         """
         self.db = db
         self._initialize_team_mappings_table()
+
+    def _resolver(self) -> TeamRedirectResolver:
+        """Retired-team redirect resolver for this database."""
+        return TeamRedirectResolver(self.db)
     
     def _initialize_team_mappings_table(self):
         """Create team_mappings table if it doesn't exist."""
@@ -80,9 +85,13 @@ class TeamMatcher:
         """Find existing team ID or create a new one.
 
         Never returns or stores a polluted (kickoff-prefixed) target:
-        - a cached mapping is honoured only when its target team row is clean;
+        - a cached mapping is honoured only when its target resolves to a clean
+          canonical row (a retired target resolves to its active root);
         - an exact clean-name match is preferred (positive id, unambiguous);
-        - the fuzzy fallback only considers clean team rows.
+        - the fuzzy fallback only considers clean, non-retired team rows.
+
+        Retired rows are never returned: a retired name resolves to its active
+        root, and two stored rows that resolve to the same root are not ambiguous.
 
         Args:
             team_name: Team name from GitHub data
@@ -102,6 +111,9 @@ class TeamMatcher:
 
         normalized_name = self._normalize_team_name(clean_name)
 
+        resolver = self._resolver()
+        retired = resolver.retired_ids()
+
         existing_teams = self.db.fetchall("SELECT id, name FROM teams")
         name_by_id = {team_id: name for team_id, name in existing_teams}
         # Clean rows only: polluted (kickoff-prefixed) rows are invisible to
@@ -110,24 +122,33 @@ class TeamMatcher:
             (team_id, name) for team_id, name in existing_teams
             if strip_kickoff(name) == name
         ]
+        # Retired rows never become fuzzy/new-target candidates; their aliases are
+        # handled by canonical resolution below.
+        active_clean_rows = [
+            (team_id, name) for team_id, name in clean_rows
+            if team_id not in retired
+        ]
 
-        # 1) Cached mapping, but only when its target is a clean canonical row.
+        # 1) Cached mapping, canonicalized to its reviewed active root. It is
+        # honoured only when that root is a clean canonical row.
         mapping = self.db.fetchone("""
             SELECT team_id, confidence
             FROM team_mappings
             WHERE team_name = ?
         """, (normalized_name,))
         if mapping and mapping[0]:
-            target_name = name_by_id.get(mapping[0])
+            root = resolver.canonical_id(mapping[0])
+            target_name = name_by_id.get(root)
             if target_name is not None and strip_kickoff(target_name) == target_name:
-                return mapping[0]
+                return root
             logger.debug(
                 f"Ignoring cached mapping '{normalized_name}' -> {mapping[0]} "
-                f"(target name {target_name!r} is not clean)"
+                f"(root {root} name {target_name!r} is not clean)"
             )
 
-        # 2) Exact clean-name match; prefer a unique positive id.
-        exact = [team_id for team_id, name in clean_rows if name == clean_name]
+        # 2) Exact clean-name match; canonicalize so a retired alias resolves to
+        # its active root. Multiple rows resolving to the same root are one team.
+        exact = sorted({resolver.canonical_id(team_id) for team_id, name in clean_rows if name == clean_name})
         if len(exact) == 1:
             return exact[0]
         positives = [team_id for team_id in exact if team_id > 0]
@@ -139,10 +160,11 @@ class TeamMatcher:
             )
             return None
 
-        # 3) Fuzzy fallback over clean rows only (unchanged 0.8 threshold).
+        # 3) Fuzzy fallback over clean, non-retired rows only (unchanged 0.8
+        # threshold).
         best_match = None
         best_score = 0.0
-        for team_id, existing_name in clean_rows:
+        for team_id, existing_name in active_clean_rows:
             score = self._similarity_score(normalized_name, self._normalize_team_name(existing_name))
             if score > best_score and score > 0.8:  # 80% similarity threshold
                 best_score = score
@@ -229,34 +251,38 @@ class TeamMatcher:
     
     def get_team_id_by_name(self, team_name: str) -> Optional[int]:
         """Get team ID by name (exact or fuzzy match).
-        
+
+        Results are canonicalized through the shared redirect resolver so a
+        cached mapping or stored (retired) row resolves to its active root.
+
         Args:
             team_name: Team name to look up
-            
+
         Returns:
             Team ID or None if not found
         """
+        resolver = self._resolver()
         normalized = self._normalize_team_name(team_name)
-        
+
         # Check mappings first
         mapping = self.db.fetchone("""
             SELECT team_id
             FROM team_mappings
             WHERE team_name = ?
         """, (normalized,))
-        
+
         if mapping and mapping[0]:
-            return mapping[0]
-        
+            return resolver.canonical_id(mapping[0])
+
         # Try direct name match
         result = self.db.fetchone("""
             SELECT id
             FROM teams
             WHERE LOWER(TRIM(name)) = LOWER(?)
         """, (team_name,))
-        
+
         if result:
-            return result[0]
-        
+            return resolver.canonical_id(result[0])
+
         return None
 

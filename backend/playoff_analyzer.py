@@ -195,6 +195,10 @@ class PlayoffAnalyzer:
             )
             params = (competition_id, self._season[0], self._season[1],
                       f"{self.season_start_year + 1}-02-01")
+        else:
+            # Always scope to the selected competition, even without a season.
+            season_clause = ' AND m.competition_id = ?'
+            params = (competition_id,)
         # Get matches from current competition that are in knockout stages
         # Use stage/round information if available, otherwise fall back to matchday
         # Filter out group stage matches explicitly
@@ -219,6 +223,10 @@ class PlayoffAnalyzer:
             JOIN teams t2 ON m.away_team_id = t2.id
             WHERE m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')
             AND (m.stage IS NULL OR m.stage != 'LEAGUE_STAGE')
+            -- A reviewed QUALIFYING tie is pre-main-stage and must never be
+            -- labelled a knockout pair. IS DISTINCT FROM keeps NULL/unknown
+            -- stages inside the existing guards.
+            AND m.stage IS DISTINCT FROM 'QUALIFYING'
             {season_clause}
             AND (
                 -- Explicit knockout stage indicators
@@ -396,6 +404,10 @@ class PlayoffAnalyzer:
         if self._season:
             season_clause = ' AND m.competition_id = ? AND m."date" >= ? AND m."date" < ?'
             params = (competition_id, self._season[0], self._season[1])
+        else:
+            # Always scope to the selected competition, even without a season.
+            season_clause = ' AND m.competition_id = ?'
+            params = (competition_id,)
         matches = self.db.fetchall(f"""
             SELECT 
                 m.stage,
@@ -406,6 +418,7 @@ class PlayoffAnalyzer:
                 m."date"
             FROM matches m
             WHERE m.status IN ('SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED')
+            AND m.stage IS DISTINCT FROM 'QUALIFYING'
             {season_clause}
             ORDER BY m.matchday DESC, m.date DESC
             LIMIT 100
@@ -547,6 +560,9 @@ class PlayoffAnalyzer:
         query_params: List[Any] = []
         conditions.append("m.competition_id = ?")
         query_params.append(competition_id)
+        # A reviewed QUALIFYING tie is never a main-stage pair, even when its
+        # round ("Play-off Round") or matchday would otherwise match a fallback.
+        conditions.append("m.stage IS DISTINCT FROM 'QUALIFYING'")
         if self._season:
             # Archived season: constrain to BOTH bounds of the selected window.
             conditions.append('m."date" >= ?')
@@ -851,12 +867,12 @@ class PlayoffAnalyzer:
         Returns:
             Set of common opponent team IDs
         """
-        # Archived seasons: common-opponent history must not reach past the
-        # selected season's end (and stays within the selected competition).
-        extra_sql = ""
-        extra_params: tuple = ()
+        # Common-opponent history stays within the selected competition. For an
+        # archived season it must also not reach past the selected season's end.
+        extra_sql = " AND competition_id = ?"
+        extra_params: tuple = (self.competition_id,)
         if self._season:
-            extra_sql = ' AND competition_id = ? AND "date" < ?'
+            extra_sql += ' AND "date" < ?'
             extra_params = (self.competition_id, self._season[1])
 
         # Get opponents for team 1
@@ -915,24 +931,23 @@ class PlayoffAnalyzer:
                 "fullLeagueTable": []
             }
         
-        # Calculate cutoff date for historical matches (last 10 years)
+        # Calculate cutoff date for historical matches (last 10 years). The
+        # mini-table is always scoped to the selected competition; an archived
+        # season also ends at the selected season's end.
         if self._season:
-            # Archived season: history ends at the selected season's end and
-            # stays within the selected competition.
             cutoff_date = (
                 datetime.fromisoformat(self._season[1])
                 - timedelta(days=self.historical_years * 365)
             ).strftime("%Y-%m-%d")
-            competition_clause = ' AND m.competition_id = ?'
             upper_clause = ' AND m."date" < ?'
-            competition_param: List[Any] = [self.competition_id]
             season_param: List[Any] = [self._season[1]]
         else:
             cutoff_date = (datetime.now() - timedelta(days=self.historical_years * 365)).strftime("%Y-%m-%d")
-            competition_clause = ''
             upper_clause = ''
-            competition_param = []
             season_param = []
+
+        competition_clause = ' AND m.competition_id = ?'
+        competition_param: List[Any] = [self.competition_id]
         
         # Build parameter lists properly - convert set to list for consistent ordering
         common_opponents_list = list(common_opponents)
@@ -1480,9 +1495,10 @@ class PlayoffAnalyzer:
                         ELSE 0
                     END as strength_score
                 FROM standings s
-                LEFT JOIN solkoff_coefficients sc ON s.team_id = sc.team_id
-                WHERE s.team_id = ?
-            """, (team_id,))
+                LEFT JOIN solkoff_coefficients sc
+                    ON s.team_id = sc.team_id AND s.competition_id = sc.competition_id
+                WHERE s.team_id = ? AND s.competition_id = ?
+            """, (team_id, self.competition_id))
             
             if result and result[0] is not None:
                 return float(result[0])

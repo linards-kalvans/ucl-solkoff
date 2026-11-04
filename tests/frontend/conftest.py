@@ -340,6 +340,22 @@ class ApiRouter:
         self.standings_status_by_season = {}
         self.pairs_by_season = {}
 
+        # Competition metadata + optional per-competition payloads. Legacy tests
+        # never set these, so the default fixtures above keep serving unchanged.
+        self.competitions = {
+            "default": "CL",
+            "competitions": [
+                {"code": "CL", "label": "Champions League", "leagueMatches": 8, "hasCurrentData": True},
+                {"code": "EL", "label": "Europa League", "leagueMatches": 8, "hasCurrentData": False},
+                {"code": "UCL", "label": "Conference League", "leagueMatches": 6, "hasCurrentData": False},
+            ],
+        }
+        self.competitions_status = 200
+        self.competition_log = []  # (method, path, competition_param or None)
+        self.standings_by_competition = {}
+        self.pairs_by_competition = {}
+        self.seasons_by_competition = {}
+
         self.counts = defaultdict(int)
         self.log = []
         self._hold = []
@@ -372,6 +388,19 @@ class ApiRouter:
     def set_seasons(self, data, status=200):
         self.seasons = deepcopy(data)
         self.seasons_status = status
+
+    def set_competitions(self, data, status=200):
+        self.competitions = deepcopy(data)
+        self.competitions_status = status
+
+    def set_standings_for_competition(self, code, data):
+        self.standings_by_competition[code.upper()] = deepcopy(data)
+
+    def set_pairs_for_competition(self, code, stage, data):
+        self.pairs_by_competition[(code.upper(), stage.upper())] = deepcopy(data)
+
+    def set_seasons_for_competition(self, code, data):
+        self.seasons_by_competition[code.upper()] = deepcopy(data)
 
     def set_standings_for_season(self, year, data):
         self.standings_by_season[int(year)] = deepcopy(data)
@@ -413,20 +442,22 @@ class ApiRouter:
         path = parsed.path
         method = request.method.upper()
         season = parse_qs(parsed.query).get("season", [None])[0]
+        competition = parse_qs(parsed.query).get("competition", [None])[0]
         self.counts[f"{method} {path}"] += 1
         self.log.append((method, path))
         self.season_log.append((method, path, season))
+        self.competition_log.append((method, path, competition))
 
         for sub in list(self._hold):
             if sub in path:
                 self._hold.remove(sub)
                 # Snapshot the response now so a late release cannot pick up a
                 # newer fixture (which would mask stale-response bugs).
-                status, body = self._response(method, path, season)
+                status, body = self._response(method, path, season, competition)
                 self._held_routes.append((route, status, body))
                 return
 
-        status, body = self._response(method, path, season)
+        status, body = self._response(method, path, season, competition)
         self._fulfill(route, status, body)
 
     # -- response selection ------------------------------------------------- #
@@ -441,11 +472,23 @@ class ApiRouter:
             return None
         return int(season)
 
-    def _response(self, method, path, season=None):
+    def _competition_code(self, competition):
+        return competition.upper() if competition else None
+
+    def _response(self, method, path, season=None, competition=None):
+        code = self._competition_code(competition)
+
+        if path == "/api/competitions" and method == "GET":
+            return self.competitions_status, self.competitions
+
         if path == "/api/seasons" and method == "GET":
+            if code is not None and code in self.seasons_by_competition:
+                return 200, self.seasons_by_competition[code]
             return self.seasons_status, self.seasons
 
         if path == "/api/standings" and method == "GET":
+            if code is not None and code in self.standings_by_competition:
+                return 200, self.standings_by_competition[code]
             year = self._season_year(season)
             if year is not None and year in self.standings_status_by_season:
                 status = self.standings_status_by_season[year]
@@ -465,6 +508,8 @@ class ApiRouter:
         match = re.match(r"^/api/knockout-pairs/([A-Za-z0-9_]+)$", path)
         if match:
             stage = match.group(1).upper()
+            if code is not None and (code, stage) in self.pairs_by_competition:
+                return 200, self.pairs_by_competition[(code, stage)]
             year = self._season_year(season)
             if year is not None and (year, stage) in self.pairs_by_season:
                 return 200, self.pairs_by_season[(year, stage)]
