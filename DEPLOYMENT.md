@@ -44,17 +44,24 @@ Read-only evidence collected over Tailscale during the current session. Full det
 
 ## Current running state
 
-**LIVE — verified 2026-11-04:** release
-`20261104T113416Z-0105334-14cb0d760c77`, image
-`sha256:e70c3f496e60b3f6b2fb19e157724683db86840f59217b8c417f8d7667ff4ec9`,
+**LIVE — verified 2026-11-05:** release
+`20261105T080558Z-2a5fb04-cc393c1ff185`, image
+`sha256:a438b08a507da701fea314967dbe4560d576e0bad5baf0c193dbcf55d937b9dc`,
 phase `production_verified_with_limitations`. See the
-[November 4 release record](docs/releases/2026-11-04-hetzner-release.md).
-CL uses football-data.org; EL and Conference League use ESPN. The November 3
-legacy image was pinned as the immediate rollback baseline under explicit user
-authorization; stale October metadata was archived. Full stopped data backups
-are retained on and off host. **Rollback must restore that release's complete
-verified data backup before starting the old image.** Resolve the active override
-from protected `/opt/ucl-solkoff/active-release.json`, not a historical release path.
+[November 5 release record](docs/releases/2026-11-05-permalink-release.md).
+Competition/season permalinks are live. Backend source is unchanged from the
+November 4 image; CL uses football-data.org, EL and Conference League use ESPN.
+Only the active and November 4 rollback images/releases remain. Full stopped
+data backups are retained on and off host. **Rollback must restore the active
+release's complete verified data backup before starting the old image.** Resolve
+the active override from protected `/opt/ucl-solkoff/active-release.json`.
+
+Recovery restored deleted Compose/release metadata and the retention helper from
+the healthy container and verified private receipt. The overwritten `.env` was
+left untouched; the reconstructed manifest reads protected
+`/opt/ucl-solkoff/runtime.env`, verified against the live container. Use
+`docker compose --env-file /dev/null ...` to avoid automatic interpolation of
+the stale project `.env`; this does not disable the manifest's `env_file`.
 
 ### Historical running-state snapshot — 2026-10-12
 
@@ -257,7 +264,9 @@ ssh deploy@openclaw.tail45ce0a.ts.net "curl -X POST http://127.0.0.1:8003/api/ca
 
 ## Environment variables
 
-Managed in `/opt/ucl-solkoff/.env` on the server (mode `600`, `deploy:deploy`). Never print resolved values.
+Managed in `/opt/ucl-solkoff/runtime.env` on the server since the November 5
+recovery (mode `600`, `deploy:deploy`). The old `.env` is not the container's
+environment source. Never print resolved values.
 
 | Variable | Description |
 |----------|-------------|
@@ -269,9 +278,9 @@ Managed in `/opt/ucl-solkoff/.env` on the server (mode `600`, `deploy:deploy`). 
 | `API_CACHE_TTL` | API cache TTL in seconds (live: 7200) |
 | `API_MIN_REQUEST_INTERVAL` | Minimum delay between API requests in seconds |
 
-After an approved release cutover has established the active-release metadata, change a value by editing `/opt/ucl-solkoff/.env` on the server and recreating the service (a restart does not pick up env changes):
+After an approved release cutover has established the active-release metadata, change a value by editing `/opt/ucl-solkoff/runtime.env` on the server and recreating the service (a restart does not pick up env changes):
 ```sh
-docker compose -p ucl-solkoff -f /opt/ucl-solkoff/compose.yml -f "$RELEASE_OVERRIDE" up -d --no-deps --no-build --pull never ucl-solkoff
+docker compose --env-file /dev/null -p ucl-solkoff -f /opt/ucl-solkoff/compose.yml -f "$RELEASE_OVERRIDE" up -d --no-deps --no-build --pull never ucl-solkoff
 ```
 Do not use the old `deploy.sh` heredoc.
 This command is a post-cutover procedure. The active-release override does not exist before the first approved cutover; do not substitute an empty path or silently fall back to `latest`.

@@ -73,17 +73,17 @@ def test_calculate_solkoff_no_opponents(calculator, mock_db):
 
 
 def test_calculate_solkoff_with_opponents(calculator, mock_db):
-    """Test Solkoff calculation with opponents."""
+    """Test Solkoff calculation averages opponent points per game."""
     # Mock get_opponents result
     mock_db.fetchall.side_effect = [
         [(2,), (3,)],  # Home matches
         [],  # Away matches
-        [(10,), (15,)]  # Opponent points (team 2 has 10, team 3 has 15)
+        [(10, 5), (15, 5)]  # (points, played) -> 2.0 and 3.0 PPG
     ]
     
     result = calculator.calculate_solkoff(1)
     
-    assert result == 25  # 10 + 15
+    assert result == 2.5  # (2.0 + 3.0) / 2
 
 
 def test_calculate_solkoff_missing_standings(calculator, mock_db):
@@ -91,12 +91,25 @@ def test_calculate_solkoff_missing_standings(calculator, mock_db):
     mock_db.fetchall.side_effect = [
         [(2,), (3,)],  # Home matches
         [],  # Away matches
-        [(10,), None]  # One opponent has points, other doesn't
+        [(10, 5), None]  # One opponent has stats, other doesn't
     ]
     
     result = calculator.calculate_solkoff(1)
     
-    assert result == 10  # Only counts non-None values
+    assert result == 2.0  # Only counts the opponent with a standings row
+
+
+def test_calculate_solkoff_ignores_zero_games(calculator, mock_db):
+    """An opponent with zero games played cannot contribute a PPG value."""
+    mock_db.fetchall.side_effect = [
+        [(2,), (3,)],  # Home matches
+        [],  # Away matches
+        [(10, 5), (15, 0)]  # Second opponent has no games to divide by
+    ]
+    
+    result = calculator.calculate_solkoff(1)
+    
+    assert result == 2.0
 
 
 def test_calculate_all(calculator, mock_db):
@@ -106,7 +119,7 @@ def test_calculate_all(calculator, mock_db):
         [(1,), (2,)],  # All teams
         [(2,)],  # Team 1 opponents (home)
         [],  # Team 1 opponents (away)
-        [(10,)],  # Team 1 opponent points
+        [(10, 5)],  # Team 1 opponent (points, played)
         [],  # Team 2 opponents (home)
         [],  # Team 2 opponents (away)
     ]
@@ -124,16 +137,17 @@ def test_calculate_all_stores_values(calculator, mock_db):
         [(1,)],  # All teams
         [(2,)],  # Team 1 opponents
         [],
-        [(15,)],  # Opponent points
+        [(15, 5)],  # Opponent (points, played) -> 3.0 PPG
     ]
     
     calculator.calculate_all()
     
-    # Check that execute was called with correct parameters
+    # Check that execute was called with the current competition-keyed contract
     call_args = mock_db.execute.call_args
     assert "INSERT INTO solkoff_coefficients" in call_args[0][0]
     params = call_args[0][1]
-    assert params[0] == 1  # team_id
-    assert params[1] == 15  # solkoff_value
-    assert params[2] is not None  # calculated_at timestamp
+    assert params[0] == "CL"  # competition_id
+    assert params[1] == 1  # team_id
+    assert params[2] == 3.0  # solkoff_value (average opponent PPG)
+    assert params[3] is not None  # calculated_at timestamp
 

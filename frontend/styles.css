@@ -777,6 +777,7 @@ img.crest {
 .team-cell {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
     min-width: 0;
 }
@@ -793,6 +794,18 @@ img.crest {
 .team-name {
     flex: 1;
     min-width: 0;
+}
+
+/* Next-fixture context: a subordinate line under the team name, matching the
+   name's left edge (crest width + cell gap) and wrapping freely on mobile. */
+.next-opponent {
+    flex: 0 0 calc(100% - 42px);
+    min-width: 0;
+    margin-left: 42px;
+    color: #9fb3c8;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: normal;
 }
 
 .team-cell.clickable,

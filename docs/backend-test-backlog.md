@@ -4,7 +4,7 @@
 
 The redesign verification run reported 162 passed and 18 failed tests. The same 18 backend failures existed before frontend work (baseline: 57 backend tests passed, 18 failed). All 105 frontend tests passed. Backend implementation and tests were not modified by the redesign.
 
-These items were recorded for investigation, not waived. Section 2 was subsequently repaired during reconciliation tooling implementation; the other 14 baseline failures remain open. Mock mismatches are observed failure causes, not proof that production code is correct. Review intended contracts before changing tests.
+These items were recorded for investigation, not waived. Section 2 was repaired during reconciliation tooling implementation. The remaining 14 baseline failures were repaired for the November 18 next-opponent release: six HTTP tests now use a seeded temporary DuckDB with the real FastAPI app and no external services; the eight Elo and Solkoff tests now use current input and output shapes. Verification: 683 tests passed with no skips or xfails. The following sections preserve the original failure analysis.
 
 ## 1. Live-server integration prerequisites — 6 failures
 

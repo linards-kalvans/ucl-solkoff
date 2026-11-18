@@ -131,18 +131,21 @@ def test_standings_ordering(mock_db, client):
 
 @patch('backend.main.db')
 def test_solkoff_details_endpoint(mock_db, client):
-    """Test Solkoff details endpoint."""
-    # Mock team info
+    """Test Solkoff details endpoint returns the live PPG contract."""
+    # Mock team info and the stored coefficient
     mock_db.fetchone.side_effect = [
         (1, "Team A", "TEA", "https://example.com/logo.png"),  # Team info
-        (25,)  # Solkoff value
+        (2.5,)  # Solkoff value (average opponent PPG)
     ]
     
-    # Mock opponent data (home and away matches) with scores and dates
-    # Format: (opponent_id, name, crest, points, home_score, away_score, date)
+    # Opponent rows must match the endpoint SELECT column order:
+    # (opponent_id, name, crest, points, played, home_score, away_score,
+    #  date, won, drawn, lost)
     mock_db.fetchall.side_effect = [
-        [(2, "Team B", "https://example.com/b.png", 10, 2, 1, "2024-01-01T00:00:00Z")],  # Home opponents
-        [(3, "Team C", "https://example.com/c.png", 15, 1, 2, "2024-01-02T00:00:00Z")]   # Away opponents
+        [(2, "Team B", "https://example.com/b.png", 10, 5, 2, 1,
+          "2026-09-15T18:00:00Z", 3, 1, 1)],  # Home opponents
+        [(3, "Team C", "https://example.com/c.png", 15, 5, 2, 1,
+          "2026-09-16T18:00:00Z", 4, 0, 1)]   # Away opponents
     ]
     
     response = client.get("/api/teams/1/solkoff-details")
@@ -151,12 +154,19 @@ def test_solkoff_details_endpoint(mock_db, client):
     data = response.json()
     assert data["teamId"] == 1
     assert data["teamName"] == "Team A"
-    assert data["solkoffCoefficient"] == 25
-    assert len(data["opponents"]) == 2
-    assert data["totalOpponentPoints"] == 25
-    # Check that matches are included
-    assert "matches" in data["opponents"][0]
-    assert len(data["opponents"][0]["matches"]) == 1
+    assert data["solkoffCoefficient"] == 2.5
+    assert data["averageOpponentPPG"] == 2.5
+    assert data["matchesCount"] == 2
+    assert data["opponentsCount"] == 2
+    assert "totalOpponentPoints" not in data
+
+    by_id = {opp["teamId"]: opp for opp in data["opponents"]}
+    assert by_id[2]["pointsPerGame"] == 2.0
+    assert by_id[3]["pointsPerGame"] == 3.0
+    assert by_id[2]["matches"][0]["outcome"] == "win"
+    assert by_id[3]["matches"][0]["outcome"] == "loss"
+    # Sorted by opponent PPG descending.
+    assert [opp["teamId"] for opp in data["opponents"]] == [3, 2]
 
 
 @patch('backend.main.db')

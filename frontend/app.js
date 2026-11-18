@@ -153,6 +153,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await fetchCompetitions();
     await fetchSeasons();
     metadataReady = true;
+    writeSelectionUrl({ replace: true });
     if (pendingTabLoad) {
         const tabId = pendingTabLoad;
         pendingTabLoad = null;
@@ -269,6 +270,24 @@ let standingsRequested = false;    // avoid duplicate league loads from routing
 let metadataReady = false;         // competition + season metadata resolved
 let pendingTabLoad = null;         // knockout stage load deferred until metadataReady
 let initialKnockoutStage = DEFAULT_KNOCKOUT_STAGE; // resolved from the stage API
+let lastSyncedLocation = null;
+
+// Query parameters identify the dataset; hashes continue to identify the view.
+// Preserve unrelated parameters when updating a shareable selection.
+function writeSelectionUrl({ replace = false } = {}) {
+    const url = new URL(window.location.href);
+    if (selectedCompetition != null) url.searchParams.set('competition', selectedCompetition);
+    if (selectedSeason != null) url.searchParams.set('season', selectedSeason);
+    if (url.href !== window.location.href) {
+        window.history[replace ? 'replaceState' : 'pushState'](null, '', url.href);
+    }
+    lastSyncedLocation = window.location.href;
+}
+
+function locationSeason() {
+    const value = new URLSearchParams(window.location.search).get('season');
+    return value && /^\d{4}$/.test(value) ? Number(value) : null;
+}
 
 function resolveRoute(hash) {
     const h = (hash || '').replace(/^#/, '');
@@ -284,6 +303,17 @@ function routeMatches(a, b) {
 }
 
 function syncFromLocation() {
+    if (lastSyncedLocation === window.location.href) return;
+    lastSyncedLocation = window.location.href;
+    const params = new URLSearchParams(window.location.search);
+    const requested = params.get('competition');
+    const code = competitions.some(c => c.code === requested) ? requested : defaultCompetition;
+    const year = locationSeason();
+    if (code !== selectedCompetition) {
+        switchCompetition(code, { preferredSeason: year, updateUrl: false });
+    } else if (seasons.some(s => s.year === year) && year !== selectedSeason) {
+        switchSeason(year, { updateUrl: false });
+    }
     const raw = (window.location.hash || '').replace(/^#/, '');
     if (IGNORED_ANCHOR_HASHES.includes(raw)) return; // skip-link and other in-page anchors
     const route = resolveRoute(window.location.hash);
@@ -335,6 +365,7 @@ function activateView(view, { updateHash = true } = {}) {
         const target = view === 'knockout' ? `#${currentRoute.stage}` : `#${view}`;
         if (window.location.hash !== target) {
             window.history.pushState(null, '', target);
+            lastSyncedLocation = window.location.href;
         }
     }
 }
@@ -430,7 +461,9 @@ async function fetchCompetitions(attempt = 1) {
         competitions = list;
         const declared = data && data.default;
         defaultCompetition = list.some(c => c.code === declared) ? declared : list[0].code;
-        selectedCompetition = defaultCompetition;
+        const requested = new URLSearchParams(window.location.search).get('competition');
+        selectedCompetition = list.some(c => c.code === requested) ? requested : defaultCompetition;
+        selectedSeason = locationSeason();
         renderCompetitionOptions();
     } catch (error) {
         if (gen !== competitionGen) return;
@@ -453,7 +486,7 @@ function renderCompetitionOptions() {
     select.disabled = competitions.length <= 1;
 }
 
-async function fetchSeasons(attempt = 1) {
+async function fetchSeasons(attempt = 1, preferredSeason = selectedSeason) {
     const gen = competitionGen;
     const query = selectedCompetition != null
         ? `?competition=${encodeURIComponent(selectedCompetition)}`
@@ -480,16 +513,15 @@ async function fetchSeasons(attempt = 1) {
         } else {
             return; // nothing usable: keep the default (no season param) behaviour
         }
-        // A valid season must be chosen for the new competition: the resolved
-        // current season wins, so a stale year from another competition is gone.
-        selectedSeason = currentSeason;
+        // Keep the requested/previous season whenever this competition offers it.
+        selectedSeason = seasons.some(s => s.year === preferredSeason) ? preferredSeason : currentSeason;
         renderSeasonOptions();
     } catch (error) {
         if (gen !== competitionGen) return;
         console.error('Error loading seasons:', error);
         if (attempt < 2) {
             await new Promise(resolve => setTimeout(resolve, 400));
-            return fetchSeasons(attempt + 1);
+            return fetchSeasons(attempt + 1, preferredSeason);
         }
     }
 }
@@ -508,9 +540,11 @@ function renderSeasonOptions() {
 // Switching seasons clears every payload tied to the previous season and
 // reloads all views. Generation guards (module counters + seasonGen) ensure a
 // late response for the old season can never paint over the new selection.
-async function switchSeason(year) {
+async function switchSeason(year, { updateUrl = true } = {}) {
     if (year === selectedSeason) return;
     selectedSeason = year;
+    renderSeasonOptions();
+    if (updateUrl) writeSelectionUrl();
     const sgen = ++seasonGen;
     // Invalidate any in-flight standings/knockout load for the previous season
     // immediately, before the stage wait below. A delayed old-season payload
@@ -554,9 +588,10 @@ async function switchSeason(year) {
 // all views. competitionGen invalidates late metadata/season responses; seasonGen
 // invalidates late standings/details/pairs responses, so an out-of-order reply
 // can never restore the previous competition's data.
-async function switchCompetition(code) {
+async function switchCompetition(code, { preferredSeason = selectedSeason, updateUrl = true } = {}) {
     if (code === selectedCompetition) return;
     selectedCompetition = code;
+    renderCompetitionOptions();
     const cgen = ++competitionGen;
     const sgen = ++seasonGen;
     // Invalidate any in-flight standings/pairs load so a late response for the
@@ -589,8 +624,9 @@ async function switchCompetition(code) {
     renderOverview();
 
     // Resolve the new competition's seasons (and a valid default season for it).
-    await fetchSeasons();
+    await fetchSeasons(1, preferredSeason);
     if (cgen !== competitionGen) return;
+    if (updateUrl) writeSelectionUrl();
 
     // Re-resolve the new competition's stage before reloading the views.
     const stageBefore = currentRoute.stage;
@@ -677,6 +713,7 @@ function activateTab(tabId, { updateHash = true, userChose = false } = {}) {
         const target = `#${tabId}`;
         if (window.location.hash !== target) {
             window.history.pushState(null, '', target);
+            lastSyncedLocation = window.location.href;
         }
     }
 
@@ -1095,6 +1132,29 @@ async function loadStandings() {
     }
 }
 
+// Supplemental league context: the first confirmed upcoming fixture, if the
+// live response carried one. Names are untrusted, so only the escaped name is
+// interpolated; a missing fixture or stat renders nothing.
+function nextOpponentHtml(fixture) {
+    if (!fixture || typeof fixture !== 'object') return '';
+    const name = String(fixture.opponentName ?? '').trim();
+    if (!name) return '';
+
+    const venue = fixture.venue === 'home' ? 'Home'
+        : fixture.venue === 'away' ? 'Away' : '';
+    let text = `Next: ${escapeHtml(name)}`;
+    if (venue) text += ` · ${venue}`;
+
+    const ppg = Number(fixture.opponentPpg);
+    const played = Number(fixture.opponentPlayed);
+    if (fixture.opponentPpg !== null && fixture.opponentPpg !== undefined
+        && Number.isFinite(ppg) && Number.isFinite(played) && played > 0) {
+        text += ` · ${ppg.toFixed(2)} PPG from ${played} ${played === 1 ? 'match' : 'matches'}`;
+    }
+
+    return `<span class="next-opponent">${text}</span>`;
+}
+
 function renderTable(rows) {
     const tableBody = document.getElementById('standingsBody');
     if (!tableBody) return;
@@ -1131,6 +1191,7 @@ function renderTable(rows) {
             <td class="team-cell clickable">
                 ${logoHtml}
                 <span class="team-name">${escapeHtml(team.teamName)}</span>
+                ${nextOpponentHtml(team.nextFixture)}
             </td>
             <td>${team.played}</td>
             <td class="col-adv">${team.won}</td>

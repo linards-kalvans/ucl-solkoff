@@ -253,3 +253,134 @@ def test_intro_banner_dismissal_persisted(open_app, page, context):
     open_app("league")
     expect(page.locator("#overview")).to_have_count(1)
     expect(page.locator("#intro-banner")).to_be_hidden()
+
+
+# ---------------------------------------------------------------------------
+# Next confirmed league-phase opponent (task 2)
+# ---------------------------------------------------------------------------
+
+def _with_next_fixture(standings, team_id, **fixture):
+    for team in standings:
+        if team["teamId"] == team_id:
+            team["nextFixture"] = fixture
+            return standings
+    raise AssertionError(f"fixture team {team_id} not found")
+
+
+def _next_opponent(page, team_id):
+    return page.locator(
+        f"#standingsBody tr[data-team-id='{team_id}'] .next-opponent")
+
+
+def test_next_opponent_shows_venue_ppg_and_sample(open_app, page, api,
+                                                  standings):
+    _with_next_fixture(
+        standings, 5,
+        opponentId=101, opponentName="Club X", venue="away",
+        opponentPpg=2.0, opponentPlayed=5,
+    )
+    api.set_standings(standings)
+    open_app("league")
+    expect(page.locator("#standingsTable")).to_be_visible()
+
+    opponent = _next_opponent(page, 5)
+    expect(opponent).to_have_text("Next: Club X · Away · 2.00 PPG from 5 matches")
+    # Supplemental text lives below the team name inside the existing cell,
+    # never in a new column.
+    row = page.locator("#standingsBody tr[data-team-id='5']")
+    expect(row.locator(".team-cell .team-name + .next-opponent")).to_have_count(1)
+    assert row.locator("td").count() == 12
+    assert page.locator("#standingsTable thead th").count() == 12
+
+
+def test_next_opponent_without_ppg_keeps_fixture(open_app, page, api,
+                                                standings):
+    _with_next_fixture(
+        standings, 5,
+        opponentId=102, opponentName="Club Y", venue="home",
+        opponentPpg=None, opponentPlayed=None,
+    )
+    api.set_standings(standings)
+    open_app("league")
+
+    expect(_next_opponent(page, 5)).to_have_text("Next: Club Y · Home")
+
+
+def test_next_opponent_uses_singular_match_sample(open_app, page, api,
+                                                  standings):
+    _with_next_fixture(
+        standings, 5,
+        opponentId=103, opponentName="Club X", venue="away",
+        opponentPpg=2.0, opponentPlayed=1,
+    )
+    api.set_standings(standings)
+    open_app("league")
+
+    expect(_next_opponent(page, 5)).to_have_text(
+        "Next: Club X · Away · 2.00 PPG from 1 match")
+
+
+def test_next_opponent_zero_ppg_is_not_omitted(open_app, page, api, standings):
+    _with_next_fixture(
+        standings, 5,
+        opponentId=104, opponentName="Club Z", venue="home",
+        opponentPpg=0.0, opponentPlayed=4,
+    )
+    api.set_standings(standings)
+    open_app("league")
+
+    expect(_next_opponent(page, 5)).to_have_text(
+        "Next: Club Z · Home · 0.00 PPG from 4 matches")
+
+
+def test_next_opponent_absent_or_null_renders_nothing(open_app, page, api,
+                                                     standings):
+    # One explicit null, one field the server omitted entirely.
+    for team in standings:
+        if team["teamId"] == 5:
+            team["nextFixture"] = None
+    api.set_standings(standings)
+    open_app("league")
+    expect(page.locator("#standingsBody tr[data-team-id]").first).to_be_visible()
+
+    expect(_next_opponent(page, 5)).to_have_count(0)
+    expect(_next_opponent(page, 6)).to_have_count(0)
+    expect(page.locator("#standingsBody .next-opponent")).to_have_count(0)
+
+
+def test_next_opponent_name_is_escaped(open_app, page, api, standings):
+    payload = '<img src=x onerror="window.__pwned=1">'
+    _with_next_fixture(
+        standings, 5,
+        opponentId=105, opponentName=payload, venue="away",
+        opponentPpg=None, opponentPlayed=None,
+    )
+    api.set_standings(standings)
+    open_app("league")
+
+    opponent = _next_opponent(page, 5)
+    expect(opponent).to_have_text(f"Next: {payload} · Away")
+    expect(opponent.locator("img")).to_have_count(0)
+    assert page.evaluate("() => window.__pwned") is None
+
+
+def test_search_ignores_next_opponent_text(open_app, page, api, standings):
+    _with_next_fixture(
+        standings, 5,
+        opponentId=106, opponentName="Searchonly FC", venue="home",
+        opponentPpg=1.5, opponentPlayed=2,
+    )
+    api.set_standings(standings)
+    open_app("league")
+    expect(_next_opponent(page, 5)).to_be_visible()
+
+    search = page.locator("#teamSearch")
+    search.fill("searchonly")
+    expect(page.locator("#standingsBody tr[data-team-id]:visible")).to_have_count(0)
+
+    # Filtering still matches the club's own name.
+    search.fill("alpha")
+    visible = page.locator("#standingsBody tr[data-team-id]:visible")
+    expect(visible).to_have_count(1)
+    expect(visible.first).to_contain_text("Alpha Strength FC")
+
