@@ -1132,6 +1132,29 @@ async function loadStandings() {
     }
 }
 
+// Supplemental league context: the first confirmed upcoming fixture, if the
+// live response carried one. Names are untrusted, so only the escaped name is
+// interpolated; a missing fixture or stat renders nothing.
+function nextOpponentHtml(fixture) {
+    if (!fixture || typeof fixture !== 'object') return '';
+    const name = String(fixture.opponentName ?? '').trim();
+    if (!name) return '';
+
+    const venue = fixture.venue === 'home' ? 'Home'
+        : fixture.venue === 'away' ? 'Away' : '';
+    let text = `Next: ${escapeHtml(name)}`;
+    if (venue) text += ` · ${venue}`;
+
+    const ppg = Number(fixture.opponentPpg);
+    const played = Number(fixture.opponentPlayed);
+    if (fixture.opponentPpg !== null && fixture.opponentPpg !== undefined
+        && Number.isFinite(ppg) && Number.isFinite(played) && played > 0) {
+        text += ` · ${ppg.toFixed(2)} PPG from ${played} ${played === 1 ? 'match' : 'matches'}`;
+    }
+
+    return `<span class="next-opponent">${text}</span>`;
+}
+
 function renderTable(rows) {
     const tableBody = document.getElementById('standingsBody');
     if (!tableBody) return;
@@ -1168,6 +1191,7 @@ function renderTable(rows) {
             <td class="team-cell clickable">
                 ${logoHtml}
                 <span class="team-name">${escapeHtml(team.teamName)}</span>
+                ${nextOpponentHtml(team.nextFixture)}
             </td>
             <td>${team.played}</td>
             <td class="col-adv">${team.won}</td>

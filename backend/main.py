@@ -2,6 +2,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from backend.season_service import (
     current_season_year,
     discover_seasons,
     is_supported_year,
+    next_fixtures,
 )
 from backend.competitions import (
     competitions_metadata,
@@ -355,7 +357,40 @@ async def get_standings(
                 "solkoffCoefficient": float(row[13]) if row[13] is not None else 0.0,
                 "strengthScore": float(row[14]) if row[14] is not None else 0.0
             })
-        
+
+        # Supplemental next-fixture context. It is resolved after the snapshot
+        # above so opponent PPG/played come from the same standings rows, and a
+        # lookup failure must never take the standings themselves down.
+        try:
+            fixtures = next_fixtures(
+                db, requested, competition_id, datetime.now(timezone.utc)
+            )
+        except Exception as e:
+            logger.warning(f"Could not attach next fixtures: {e}", exc_info=True)
+            fixtures = {}
+
+        standings_by_id = {row["teamId"]: row for row in standings}
+        for row in standings:
+            fixture = fixtures.get(row["teamId"])
+            if fixture is None:
+                row["nextFixture"] = None
+                continue
+
+            opponent = standings_by_id.get(fixture["opponentId"]) or {}
+            played = opponent.get("played")
+            points = opponent.get("points")
+            ppg = None
+            if played is not None and played > 0 and points is not None:
+                ppg = round(points / played, 2)
+
+            row["nextFixture"] = {
+                "opponentId": fixture["opponentId"],
+                "opponentName": fixture["opponentName"],
+                "venue": fixture["venue"],
+                "opponentPpg": ppg,
+                "opponentPlayed": played if ppg is not None else None,
+            }
+
         return standings
     
     except Exception as e:

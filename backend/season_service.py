@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -207,6 +207,89 @@ def build_standings(db, year: int, competition_id: str = "CL") -> List[Dict[str,
     """Historical league standings for ``year`` (empty list when no data)."""
     ordered, _ = _reconstruct(db, year, competition_id)
     return ordered
+
+
+def _parse_kickoff(value: Any) -> Optional[datetime]:
+    """Parse a stored match date as a UTC instant.
+
+    Naive values (including date-only rows) are read as UTC, matching the
+    writers. Blank, missing and malformed values return ``None`` so one bad row
+    can never break the standings response.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text[-1] in ("Z", "z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def next_fixtures(db, year: int, competition_id: str = "CL",
+                  now: Optional[datetime] = None) -> Dict[int, Dict[str, Any]]:
+    """First strictly-future league-phase fixture per club, in one query.
+
+    Only stored ``LEAGUE_STAGE`` rows that are still ``SCHEDULED``/``TIMED`` and
+    inside ``year``'s UTC season bounds qualify. Kickoff instants are parsed and
+    compared in Python: stored values may carry offsets or be date-only, so a
+    textual cutoff could misjudge fixtures near a boundary. The earlier kickoff
+    wins, then the lower match id. A club never becomes its own opponent and a
+    row with a blank team name is ignored rather than rendered.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+
+    start = datetime(year, 8, 1, tzinfo=timezone.utc)
+    end = datetime(year + 1, 8, 1, tzinfo=timezone.utc)
+
+    rows = db.fetchall(
+        """
+        SELECT m.id, m.home_team_id, m.away_team_id, m."date",
+               h.name, a.name
+        FROM matches m
+        JOIN teams h ON m.home_team_id = h.id
+        JOIN teams a ON m.away_team_id = a.id
+        WHERE m.competition_id = ?
+          AND m.stage = 'LEAGUE_STAGE'
+          AND m.status IN ('SCHEDULED', 'TIMED')
+          AND m.home_team_id <> m.away_team_id
+        """,
+        (competition_id,),
+    )
+
+    best: Dict[int, Tuple[Tuple[datetime, int], Dict[str, Any]]] = {}
+    for match_id, home_id, away_id, date_value, home_name, away_name in rows:
+        if not str(home_name or "").strip() or not str(away_name or "").strip():
+            continue
+        kickoff = _parse_kickoff(date_value)
+        if kickoff is None or kickoff <= now or not (start <= kickoff < end):
+            continue
+
+        key = (kickoff, match_id)
+        for team_id, opponent_id, opponent_name, venue in (
+            (home_id, away_id, away_name, "home"),
+            (away_id, home_id, home_name, "away"),
+        ):
+            current = best.get(team_id)
+            if current is not None and current[0] <= key:
+                continue
+            best[team_id] = (key, {
+                "opponentId": opponent_id,
+                "opponentName": opponent_name,
+                "venue": venue,
+            })
+
+    return {team_id: fixture for team_id, (_, fixture) in best.items()}
 
 
 def build_breakdown(db, team_id: int, year: int,

@@ -12,6 +12,15 @@ from backend.elo_calculator import (
 from backend.database import Database
 
 
+# Representative match rows consumed by ``get_team_stats``:
+# (home_id, away_id, home_score, away_score, date, home_name, away_name).
+# Team 1 wins at home and draws away; team 2 loses away and draws at home.
+TEAM_STATS_ROWS = [
+    (1, 2, 2, 0, "2026-09-01T18:00:00Z", "Team 1", "Team 2"),
+    (2, 1, 1, 1, "2026-09-08T18:00:00Z", "Team 2", "Team 1"),
+]
+
+
 @pytest.fixture
 def mock_db():
     return Mock(spec=Database)
@@ -174,6 +183,7 @@ def test_get_rating_not_found(calculator, mock_db):
 
 def test_get_win_probability_equal_ratings(calculator, mock_db):
     mock_db.fetchone.side_effect = [(1500.0, 10), (1500.0, 10)]
+    mock_db.fetchall.return_value = TEAM_STATS_ROWS
     result = calculator.get_win_probability(1, 2)
     assert result is not None
     assert result["method"] == "elo"
@@ -181,10 +191,14 @@ def test_get_win_probability_equal_ratings(calculator, mock_db):
     assert abs(result["team2Win"] - 0.5) < 0.001
     assert result["draw"] == 0.0
     assert abs(result["team1Win"] + result["team2Win"] - 1.0) < 1e-6
+    assert result["team1Stats"]["won"] == 1
+    assert result["team1Stats"]["drawn"] == 1
+    assert result["team2Stats"]["lost"] == 1
 
 
 def test_get_win_probability_higher_rated_favored(calculator, mock_db):
     mock_db.fetchone.side_effect = [(1600.0, 10), (1500.0, 10)]
+    mock_db.fetchall.return_value = TEAM_STATS_ROWS
     result = calculator.get_win_probability(1, 2)
     assert result["team1Win"] > 0.5
     assert result["team2Win"] < 0.5
@@ -210,6 +224,7 @@ def test_get_win_probability_returns_none_if_insufficient_matches(calculator, mo
 
 def test_get_win_probability_includes_elo_details(calculator, mock_db):
     mock_db.fetchone.side_effect = [(1550.0, 12), (1480.0, 9)]
+    mock_db.fetchall.return_value = TEAM_STATS_ROWS
     result = calculator.get_win_probability(1, 2)
     assert "team1EloRating" in result
     assert "team2EloRating" in result
@@ -217,3 +232,8 @@ def test_get_win_probability_includes_elo_details(calculator, mock_db):
     assert "team2MatchesPlayed" in result
     assert result["team1EloRating"] == 1550.0
     assert result["team2EloRating"] == 1480.0
+    assert result["team1Stats"]["goalsFor"] == 3
+    assert result["team1Stats"]["goalsAgainst"] == 1
+    assert result["team2Stats"]["won"] == 0
+    assert result["team2Stats"]["drawn"] == 1
+    assert result["team2Stats"]["lost"] == 1
