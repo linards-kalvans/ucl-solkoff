@@ -15,7 +15,7 @@ UCL Solkoff (UEFA Champions League standings, Solkoff coefficients, and knockout
 
 **Access:** SSH as `deploy@openclaw.tail45ce0a.ts.net` (Tailscale).
 
-> **Do not use `deploy.sh`.** The repository's `deploy.sh` targets the old topology: it syncs over the public IP, overwrites `/opt/ucl-solkoff/.env` via a heredoc, patches a containerized Caddy in `/opt/openclaw/Caddyfile`, and injects a `ucl_data` named volume into `/opt/openclaw/docker-compose.yml`. None of that matches the live server. Running it would corrupt the live environment. All current operations use the standalone manifest and systemd Caddy described below.
+> **GitHub pushes do not deploy production.** The obsolete `Deploy UCL Solkoff` workflow and its `deploy.sh` were removed after a push-triggered run deleted the Hetzner release configuration before failing. Do not rerun historical jobs or restore the old script. Use the standalone manifest and systemd Caddy procedure below.
 
 ## Verified topology (read-only preflight)
 

@@ -23,4 +23,4 @@ uv run pytest
 
 ## Deployment
 
-Deployed on [Railway](https://railway.app). Push to `main` triggers auto-redeploy. See [DEPLOYMENT.md](DEPLOYMENT.md) for details.
+Production runs on Hetzner. Pushes to `main` do not deploy it. Follow the guarded release procedure in [DEPLOYMENT.md](DEPLOYMENT.md).
